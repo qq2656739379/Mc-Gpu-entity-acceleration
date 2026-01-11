@@ -1,0 +1,9 @@
+Manifest-Version: 1.0
+Specification-Title: GPU Entity Acceleration
+Specification-Vendor: GPUAccel
+Specification-Version: 1
+Implementation-Title: javajiashu
+Implementation-Version: 1.0.0
+Implementation-Vendor: GPUAccel
+Implementation-Timestamp: 2026-01-09T15:50:33+0800
+

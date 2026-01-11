@@ -22,7 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class VoxelManager {
     public static final int PHERO_SIZE_XZ = 512;
     public static final int PHERO_SIZE_Y = 128;
+    public static final int PHERO_CHANNELS = 8; // Grain, Meat, Fish, Salt, Predator, Prey, Herd, Player
     public static final int PHERO_VOLUME = PHERO_SIZE_XZ * PHERO_SIZE_XZ * PHERO_SIZE_Y;
+    public static final int PHERO_TOTAL_SIZE = PHERO_VOLUME * PHERO_CHANNELS;
     
     public static final int VOXEL_SIZE = 128; 
     public static final int VOXEL_VOLUME = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;

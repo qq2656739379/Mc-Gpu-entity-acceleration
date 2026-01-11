@@ -41,6 +41,7 @@ public class SwarmAISystem {
     private final GPUManager gpuManager;
     private cl_kernel swarmKernel;
     private cl_kernel diffuseKernel;
+    private cl_kernel injectKernel;
     
     private List<Entity> pendingEntities = null;
     private int pendingEntityCount = 0;
@@ -64,6 +65,7 @@ public class SwarmAISystem {
             String source = SwarmKernelSource.getSource();
             swarmKernel = gpuManager.compileKernel(source, "calculateSwarmBehavior");
             diffuseKernel = gpuManager.compileKernel(source, "diffuse_pheromones");
+            injectKernel = gpuManager.compileKernel(source, "inject_stimuli");
             LOGGER.info("Swarm AI Kernels compiled successfully.");
         } catch (Exception e) {
             LOGGER.error("Failed to compile Swarm AI Kernel", e);
@@ -121,11 +123,18 @@ public class SwarmAISystem {
                 VoxelManager.clearDirty();
             }
             
-            // 🚀 扩散
+            // 🚀 扩散与注入
             if (diffuseKernel != null) {
                 cl_mem inputMap = usePingForRead ? gpuManager.getPheromoneMemA() : gpuManager.getPheromoneMemB();
                 cl_mem outputMap = usePingForRead ? gpuManager.getPheromoneMemB() : gpuManager.getPheromoneMemA();
                 
+                // 1. Inject Stimuli into the INPUT map before diffusion
+                if (injectKernel != null) {
+                    BlockPos center = filteredEntities.get(0).blockPosition();
+                    StimulusManager.scanAndInject(level, center, gpuManager, injectKernel, inputMap);
+                }
+
+                // 2. Diffuse Input -> Output
                 int argIdx = 0;
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_mem, Pointer.to(inputMap));
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_mem, Pointer.to(outputMap));

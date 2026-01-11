@@ -57,6 +57,10 @@ public class GPUManager {
     // Attributes
     private cl_mem attrXMem, attrYMem, attrZMem, attrTypeMem;
     private int attrCapacity = 0;
+
+    // Stimulus Injection Buffers
+    private cl_mem stimPosMem, stimChannelMem, stimValueMem;
+    private int stimCapacity = 0;
     
     // Pheromone Ping-Pong Buffers
     private cl_mem pheromoneMemA;
@@ -128,8 +132,12 @@ public class GPUManager {
         clGetDeviceInfo(device, CL_DEVICE_GLOBAL_MEM_SIZE, Sizeof.cl_long, Pointer.to(val), null);
         globalMemorySize = val[0];
 
-        // Init Buffers
-        int pheroBytes = VoxelManager.PHERO_VOLUME * Sizeof.cl_float;
+        // Init Buffers (Expanded for Multi-Channel)
+        // PHERO_VOLUME is per channel. Total size is VOLUME * CHANNELS
+        // Note: Java int is 2GB max for array index, but clCreateBuffer takes 'long' for size.
+        // 512*512*128 * 8 * 4 bytes = 1 GB. Safe.
+        long pheroBytes = (long)VoxelManager.PHERO_VOLUME * VoxelManager.PHERO_CHANNELS * Sizeof.cl_float;
+
         pheromoneMemA = clCreateBuffer(context, CL_MEM_READ_WRITE, pheroBytes, null, null);
         pheromoneMemB = clCreateBuffer(context, CL_MEM_READ_WRITE, pheroBytes, null, null);
         
@@ -324,7 +332,44 @@ public class GPUManager {
         clEnqueueNDRangeKernel(commandQueue, kernel, dim, null, global, local, 0, null, null);
         clFlush(commandQueue);
     }
+
+    public void injectStimuli(float[] positions, int[] channels, float[] values, int count, cl_kernel injectKernel, cl_mem targetBuffer) {
+        if (!gpuAvailable || count == 0) return;
+
+        if (count > stimCapacity) {
+            if (stimPosMem != null) { clReleaseMemObject(stimPosMem); clReleaseMemObject(stimChannelMem); clReleaseMemObject(stimValueMem); }
+            stimCapacity = count + 256;
+            stimPosMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 3 * 4, null, null);
+            stimChannelMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
+            stimValueMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
+        }
+
+        clEnqueueWriteBuffer(commandQueue, stimPosMem, CL_FALSE, 0, (long)count * 3 * 4, Pointer.to(positions), 0, null, null);
+        clEnqueueWriteBuffer(commandQueue, stimChannelMem, CL_FALSE, 0, (long)count * 4, Pointer.to(channels), 0, null, null);
+        clEnqueueWriteBuffer(commandQueue, stimValueMem, CL_TRUE, 0, (long)count * 4, Pointer.to(values), 0, null, null);
+
+        // Execute Inject Kernel
+        // void inject_stimuli(phero, pos, ch, val, count, ox, oy, oz, sxz, sy)
+        int argIdx = 0;
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(targetBuffer));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimPosMem));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimChannelMem));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimValueMem));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{count}));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{GPUManager.currentMapOrigin[0]}));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{GPUManager.currentMapOrigin[1]}));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{GPUManager.currentMapOrigin[2]}));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{VoxelManager.PHERO_SIZE_XZ}));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{VoxelManager.PHERO_SIZE_Y}));
+
+        long[] globalWorkSize = new long[]{count};
+        clEnqueueNDRangeKernel(commandQueue, injectKernel, 1, null, globalWorkSize, null, 0, null, null);
+    }
     
+    public cl_mem getStimPosMem() { return stimPosMem; }
+    public cl_mem getStimChannelMem() { return stimChannelMem; }
+    public cl_mem getStimValueMem() { return stimValueMem; }
+
     public cl_mem createBuffer(long flags, long size, Pointer ptr) {
         if (!gpuAvailable) return null;
         return clCreateBuffer(context, flags, size, ptr, null);
@@ -374,6 +419,10 @@ public class GPUManager {
         if (attrZMem != null) clReleaseMemObject(attrZMem);
         if (attrTypeMem != null) clReleaseMemObject(attrTypeMem);
         if (beeStatesMem != null) clReleaseMemObject(beeStatesMem);
+
+        if (stimPosMem != null) clReleaseMemObject(stimPosMem);
+        if (stimChannelMem != null) clReleaseMemObject(stimChannelMem);
+        if (stimValueMem != null) clReleaseMemObject(stimValueMem);
     }
 
     // Getters

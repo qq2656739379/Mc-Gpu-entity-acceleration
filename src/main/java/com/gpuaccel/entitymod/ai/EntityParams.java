@@ -35,8 +35,18 @@ public class EntityParams {
         p[7] = 0.42f; // Jump Height
         p[8] = 1.0f;  // Mass
         p[9] = -0.5f; // FOV
-        p[10] = 64.0f;// Panic Distance
+        p[10] = 0.0f; // Familiarity (Placeholder)
         
+        // Get Behavior Profile
+        String entityId = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
+        EntityBehaviorRegistry.BehaviorProfile profile = EntityBehaviorRegistry.getProfile(entityId);
+        p[11] = (float)profile.behaviorId(); // Store Behavior ID
+
+        // TFC Familiarity Check (Mock logic - real implementation needs TFC API or NBT read)
+        if (e.getTags().contains("familiar")) {
+            p[10] = 1.0f;
+        }
+
         fillPhysicsParams(e, p);
 
         if (type == TYPE_WALKER && e instanceof Mob mob) {

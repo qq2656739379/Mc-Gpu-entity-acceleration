@@ -1,229 +1,169 @@
 # GPU Entity Acceleration Mod
 
-一个用于 Minecraft Forge 1.20.1 (47.4) 的服务端 Mod，通过 GPU 加速生物相关计算（群体 AI、物理模拟）。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Forge](https://img.shields.io/badge/Forge-1.20.1-orange.svg)](https://files.minecraftforge.net/)
 
-## 功能特性
+一个专为 Minecraft Forge 1.20.1 设计的高性能服务端 Mod。它利用 OpenCL 技术，将繁重的生物 AI 和物理计算卸载到 GPU 上并行处理，从而在不降低服务器 TPS 的情况下支持更大规模的生物数量。
 
-### 🚀 GPU 加速计算
-- 使用 OpenCL 进行 GPU 加速
-- 自动检测可用的 GPU 设备
-- GPU 不可用时自动回退到 CPU 计算
+## ✨ 核心功能
 
-### 🐦 群体 AI 系统
-- 实现经典的 Boids 算法（分离、对齐、聚合）
-- 适用于飞行生物（蝙蝠、蜜蜂等）
-- 可配置的行为参数
-- 大量实体时使用 GPU 并行计算
+### 🚀 GPU 并行加速 (OpenCL)
+- **高性能计算**：利用显卡的并行处理能力，处理数千个实体的行为逻辑。
+- **智能回退**：自动检测 OpenCL 环境，若 GPU 不可用则平滑切换回 CPU 计算，确保稳定性。
 
-### ⚙️ 物理模拟系统
-- GPU 加速的物理引擎
-- 重力、空气阻力、地面摩擦
-- 碰撞检测和响应
-- 可为自定义实体启用
+### 🧠 群体智能系统 (Swarm AI)
+- **Boids 算法实现**：完美复刻经典的鸟群/鱼群行为（分离、对齐、聚合）。
+- **优化飞行生物**：专为蝙蝠、蜜蜂等飞行生物设计，模拟自然的群聚飞舞效果。
+- **高效处理**：在 GPU 上同时计算数千个实体的相互作用力，几乎不占用主线程时间。
 
-## 系统要求
+### 🗺️ 体素地形感知 (Voxel System)
+- **智能避障**：基于体素化地图的快速碰撞检测，实体能感知地形并自动规避。
+- **栅栏识别**：通过“高方块”识别逻辑，防止生物错误地跳过栅栏或围墙。
+- **零卡顿更新**：采用分时切片扫描技术 (Incremental Update)，地形数据更新对服务器性能影响微乎其微。
 
-- Minecraft 1.20.1
-- Forge 47.4.0
-- Java 17
-- 支持 OpenCL 的 GPU（推荐）或 CPU
+### 🌍 动态气候系统 (Climate System)
+- **GPU 温度平滑**：利用 GPU 异步计算区块温度分布，实现更自然的热量扩散模拟（可用于生存模组扩展）。
 
-## 安装
+### ⚛️ 物理模拟引擎
+- **实体物理**：接管实体的重力、空气阻力、地面摩擦计算。
+- **碰撞响应**：基于 GPU 的快速碰撞反馈，支持自定义实体弹力系数。
 
-1. 确保安装了 Forge 47.4.0
-2. 将 Mod JAR 文件放入 `mods` 文件夹
-3. 启动服务器
+## 💻 系统要求
 
-## 开发构建
+| 组件 | 最低要求 | 推荐配置 |
+|------|----------|----------|
+| **Minecraft** | 1.20.1 | 1.20.1 |
+| **Forge** | 47.4.0+ | 最新稳定版 |
+| **Java** | Java 17 | Java 17 |
+| **GPU** | 支持 OpenCL 1.2 的显卡 | NVIDIA GTX 1060 / AMD RX 580 或更高 |
+| **驱动** | 最新显卡驱动 | 包含 OpenCL 支持的驱动 |
 
-### 环境设置
+> **注意**：本模组为服务端 Mod，客户端无需安装即可进入服务器。
 
-```bash
-# 克隆/创建项目
-cd javajiashu
+## 📥 安装指南
 
-# 生成开发环境
-./gradlew genIntellijRuns  # IntelliJ IDEA
-# 或
-./gradlew genEclipseRuns   # Eclipse
+1. **环境准备**：
+   - 确保服务器已安装 **Forge 1.20.1**。
+   - 确保服务器显卡驱动已更新，并支持 OpenCL。
+     - **NVIDIA**: 安装 CUDA Toolkit 或标准驱动。
+     - **AMD**: 安装标准驱动即可。
+     - **Linux 用户**: 可能需要安装 `clinfo` 和对应的 OpenCL 运行时 (如 `nvidia-opencl-icd`).
 
-# 构建 Mod
-./gradlew build
-```
+2. **安装 Mod**：
+   - 将 Mod JAR 文件放入服务器的 `mods` 文件夹。
+   - 启动服务器。
 
-### 项目结构
+3. **验证安装**：
+   - 查看控制台日志，寻找类似 `[GPU Manager] GPU Device: NVIDIA GeForce RTX 3060` 的信息。
+   - 在游戏内使用 `/gpuaccel info` 命令检查状态。
 
-```
-src/main/java/com/gpuaccel/entitymod/
-├── GPUEntityAccelMod.java          # Mod 主类
-├── gpu/
-│   └── GPUManager.java             # GPU 管理和 OpenCL 封装
-├── ai/
-│   └── SwarmAISystem.java          # 群体 AI 系统
-├── physics/
-│   └── PhysicsSimulation.java      # 物理模拟系统
-├── event/
-│   └── EntityTickHandler.java      # 事件处理器
-└── config/
-    └── GPUAccelConfig.java         # 配置文件
-```
+## ⚙️ 配置详解
 
-## 配置
+本模组配置文件位于 `config/` 目录下（注意：从旧版的 `serverconfig` 移至 `config` 以支持更通用的配置）。
 
-配置文件位于 `serverconfig/gpuaccel-server.toml`：
+### 1. 全局配置 (`gpuaccel-general.toml`)
+控制 GPU 加速的核心开关和算法选择。
 
 ```toml
 [GPU Settings]
-  # 启用 GPU 加速
+  # 启用 GPU 加速 (必须有支持 OpenCL 的设备)
   enableGPU = true
-  # 使用 GPU 的最小实体数量
+  # 触发 GPU 加速的最小实体数 (少于此数量使用 CPU 以减少开销)
   minEntitiesForGPU = 10
 
-[Swarm AI Settings]
-  # 启用群体 AI
-  enableSwarmAI = true
-  # 分离半径
-  separationRadius = 3.0
-  # 对齐半径
-  alignmentRadius = 5.0
-  # 聚合半径
-  cohesionRadius = 7.0
-  # 各种力的权重
-  separationWeight = 1.5
-  alignmentWeight = 1.0
-  cohesionWeight = 1.0
-  # 最大速度
-  maxSpeed = 0.5
-
-[Physics Settings]
-  # 启用物理模拟（默认关闭）
-  enablePhysics = false
-  gravity = 9.8
-  airResistance = 0.1
-  groundFriction = 2.0
-  restitution = 0.5
+[Algorithm Selection]
+  # 启用 GPU 群体 AI (Swarm AI)
+  enableSwarmAIGPU = true
+  # 启用 GPU 物理模拟 (默认关闭，按需开启)
+  enablePhysicsGPU = false
+  # 激进模式：处理所有非玩家生物 (包括模组生物)，可能增加负载
+  aggressiveMode = false
 
 [Performance Settings]
-  # 更新间隔（tick）
-  updateInterval = 2
+  # 更新间隔 (Tick)。1=每tick更新。
+  # 调高此值可大幅提升性能，但生物反应会变慢。
+  updateInterval = 1
 ```
 
-## 使用示例
+### 2. 群体 AI 配置 (`gpuaccel-swarm.toml`)
+调整生物群聚的行为参数。
 
-### 为自定义实体启用群体 AI
-
-群体 AI 自动应用于：
-- 所有飞行动物（FlyingAnimal）
-- 鱼类、蝙蝠、蜜蜂等
-
-### 为实体启用物理模拟
-
-给实体添加标签：
-```java
-entity.addTag("gpu_physics");
+```toml
+[Swarm Settings]
+  # 吸引力：生物向目标点移动的力度
+  "Attraction Force" = 0.05
+  # 悬停频率：飞行生物原地悬停的抖动频率
+  "Hover Frequency" = 2.0
+  # ...其他参数可调整聚集程度和分散度
 ```
 
-### 在代码中使用 GPU 系统
+### 3. 体素系统配置 (`gpuaccel-voxel.toml`)
+调整地形感知的精度和性能。
 
-```java
-// 获取 GPU 管理器
-GPUManager gpuManager = GPUEntityAccelMod.getGPUManager();
-
-// 获取群体 AI 系统
-SwarmAISystem swarmAI = GPUEntityAccelMod.getSwarmAISystem();
-List<Mob> entities = ...; // 你的实体列表
-swarmAI.computeSwarmBehavior(entities);
-
-// 获取物理模拟系统
-PhysicsSimulation physics = GPUEntityAccelMod.getPhysicsSimulation();
-physics.updatePhysics(entities, deltaTime);
+```toml
+[voxel_system]
+  # 扫描半径 (单位：块)，影响生物能感知的地形范围
+  scanRadius = 32
+  # 地形数据重扫描间隔 (Tick)
+  updateInterval = 20
 ```
 
-## 性能优化建议
+## 🎮 命令使用
 
-1. **GPU 阈值**：调整 `minEntitiesForGPU` 以找到最佳平衡点
-2. **更新间隔**：增加 `updateInterval` 可提高性能，但会降低流畅度
-3. **半径设置**：减小行为半径可减少计算量
-4. **选择性启用**：只对需要的实体类型启用 GPU 加速
+需要 OP 权限 (Level 2+)。
 
-## OpenCL 驱动安装
+### 基础命令
+- `/gpuaccel info`
+  - 显示当前 GPU 设备信息、显存使用情况和计算单元数量。
+  - 用于验证 OpenCL 是否正常工作。
 
-### NVIDIA GPU
-下载并安装 NVIDIA CUDA Toolkit（包含 OpenCL）
+- `/gpuaccel spawn_swarm`
+  - 在玩家周围生成 50 只蝙蝠，用于测试群体 AI 效果。
 
-### AMD GPU
-下载并安装 AMD APP SDK 或最新的 GPU 驱动
+### 高级控制 (需启用 `AlgorithmCommand`)
+*注：以下命令在部分版本中可用，用于实时调试。*
+- `/gpualgo global <true|false>`: 实时切换 GPU 加速总开关。
+- `/gpualgo swarm <true|false>`: 实时切换群体 AI 模块。
+- `/gpualgo status`: 查看当前各模块开启状态。
 
-### Intel GPU
-Intel GPU 驱动通常包含 OpenCL 支持
+## 🔧 故障排除
 
-### 验证 OpenCL
+### ❓ 服务器启动时提示 "No OpenCL platforms found"
+- **原因**：系统未安装 OpenCL 驱动，或驱动不完整。
+- **解决**：
+  - Windows: 更新显卡驱动。
+  - Linux: 运行 `clinfo` 检查，安装 `ocl-icd-opencl-dev` 或对应显卡厂商的 OpenCL 包。
+
+### ❓ 生物行为卡顿或瞬移
+- **原因**：GPU 负载过高或数据传输延迟。
+- **解决**：
+  - 在 `gpuaccel-general.toml` 中将 `updateInterval` 调大 (例如 2 或 3)。
+  - 增大 `minEntitiesForGPU` 阈值。
+
+### ❓ "Config conflict detected" 崩溃
+- **原因**：旧版配置文件冲突。
+- **解决**：删除 `config/` 目录下的相关 `.toml` 文件，让 Mod 重新生成。
+
+## 🛠️ 开发者指南
+
+### 构建项目
 ```bash
-# 使用 clinfo 工具检查
-clinfo
+./gradlew build
 ```
 
-## 故障排除
-
-### GPU 未检测到
-- 检查 OpenCL 驱动是否安装
-- 查看服务器日志中的 GPU 信息
-- 确认 GPU 支持 OpenCL 1.2+
-
-### 性能问题
-- 检查是否使用了正确的 GPU（而非集成显卡）
-- 调整配置参数
-- 监控 GPU 使用率
-
-### 编译错误
-- 确保使用 Java 17
-- 检查 Gradle 版本
-- 清理并重新构建：`./gradlew clean build`
-
-## 技术细节
-
-### GPU 计算流程
-1. 收集实体数据（位置、速度等）
-2. 传输到 GPU 内存
-3. 执行 OpenCL 内核计算
-4. 读取结果回 CPU
-5. 应用到 Minecraft 实体
-
-### OpenCL 内核
-- **群体 AI 内核**：计算分离、对齐、聚合力
-- **物理内核**：更新位置、速度、应用力
-- **碰撞内核**：检测和响应实体间碰撞
-
-## 扩展开发
-
-### 添加自定义 GPU 内核
+### 接入 API
+其他模组可以通过获取 `GPUManager` 实例来使用 OpenCL 加速：
 
 ```java
-String myKernel = """
-    __kernel void myComputation(...) {
-        // OpenCL C 代码
-    }
-    """;
+import com.gpuaccel.entitymod.GPUEntityAccelMod;
 
-cl_kernel kernel = gpuManager.compileKernel(myKernel, "myComputation");
+// 获取 GPU 管理器
+var gpuManager = GPUEntityAccelMod.getGPUManager();
+if (gpuManager.isGPUAvailable()) {
+    // 你的 OpenCL 代码...
+}
 ```
 
-### 创建新的 GPU 系统
+## 📄 许可证
 
-参考 `SwarmAISystem` 和 `PhysicsSimulation` 的实现模式。
-
-## 许可证
-
-MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 作者
-
-GPUAccel Team
-
----
-
-**注意**：这是一个服务端 Mod，不需要客户端安装。
+本项目采用 [MIT License](LICENSE) 开源。

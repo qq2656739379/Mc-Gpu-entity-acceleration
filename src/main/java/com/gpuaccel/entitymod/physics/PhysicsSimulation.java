@@ -142,7 +142,8 @@ public class PhysicsSimulation {
                     if (vel.y < 0) vel.y = 0;
                     nextPos.y += 0.1f; // 挤上去
                     pos.y += 0.1f;
-                    vel.y += 2.0f * dt; // 给个向上的小推力
+                    // FIX: Remove upward velocity boost to prevent flying/hovering
+                    // vel.y += 2.0f * dt;
                 } else {
                     // 真的撞墙了 -> 简单的滑行处理 (Project Velocity)
                     float3 testX = (float3)(nextPos.x, pos.y, pos.z);
@@ -163,8 +164,18 @@ public class PhysicsSimulation {
                         }
                         nextPos.y = pos.y; // 重置 Y
                     }
-                    if (hitX) { vel.x = -vel.x * elast; nextPos.x = pos.x; }
-                    if (hitZ) { vel.z = -vel.z * elast; nextPos.z = pos.z; }
+                    if (hitX) {
+                        vel.x = -vel.x * elast;
+                        nextPos.x = pos.x;
+                        // Damping on collision to prevent sticking/jittering
+                        vel.x *= 0.5f;
+                    }
+                    if (hitZ) {
+                        vel.z = -vel.z * elast;
+                        nextPos.z = pos.z;
+                        // Damping on collision
+                        vel.z *= 0.5f;
+                    }
                 }
             }
             

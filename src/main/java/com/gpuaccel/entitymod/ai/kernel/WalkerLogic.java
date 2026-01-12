@@ -64,7 +64,8 @@ public class WalkerLogic {
             __global const char* voxels, int mapOX, int mapOY, int mapOZ, int mapSize,
             __global float* prevPositions, __global int* stuckTimer,
             bool lodActive,
-            float3 playerPos
+            float3 playerPos,
+            float3 windForce
         ) {
             int pBase = gid * 12; 
             float maxSpeed    = params[pBase + 0];
@@ -119,6 +120,10 @@ public class WalkerLogic {
 
             // --- 物理层 ---
             float3 acc = (float3)(0);
+
+            // Apply Wind
+            acc += windForce;
+
             float liqFactor = (float)inLiquid;
             acc.y -= gravity * (1.0f - liqFactor);
             vel.y += liqFactor * 0.02f;

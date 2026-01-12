@@ -139,6 +139,7 @@ public class SwarmKernelSource {
             const float time,
             const float attractionForce, const float arriveRadius, const float gatherChance, const float hoverFreq, const float hoverAmp,
             const float worldTime, const int isRaining,
+            const float3 windForce, const float rainIntensity,
             __global const float* params
         ) {
             int gid = get_global_id(0);
@@ -166,7 +167,8 @@ public class SwarmKernelSource {
                     gid, behaviorID, pos, vel,
                     myParams, pheromones,
                     mapOX, mapOY, mapOZ, pSizeXZ, pSizeY,
-                    voxels, voxOX, voxOY, voxOZ, voxSize
+                    voxels, voxOX, voxOY, voxOZ, voxSize,
+                    windForce
                 );
 
                 // Then apply Walker/Swimmer physics constraints on top
@@ -185,7 +187,8 @@ public class SwarmKernelSource {
                     positions, velocities, entityCount, entityTypes, 
                     myParams,
                     voxels, voxOX, voxOY, voxOZ, voxSize,
-                    prevPositions, stuckTimer, lodActive, pPos3
+                    prevPositions, stuckTimer, lodActive, pPos3,
+                    windForce
                 );
             }
             else if (type == 5) { // SWIMMER
@@ -194,7 +197,8 @@ public class SwarmKernelSource {
                     positions, velocities, entityCount, entityTypes,
                     myParams,
                     voxels, voxOX, voxOY, voxOZ, voxSize,
-                    prevPositions, stuckTimer, lodActive, pPos3
+                    prevPositions, stuckTimer, lodActive, pPos3,
+                    windForce
                 );
             }
             else if (type == 1) { // ITEM
@@ -222,7 +226,8 @@ public class SwarmKernelSource {
                     myParams,
                     lodActive,
                     pheromones, mapOX, mapOY, mapOZ, pSizeXZ, pSizeY,
-                    voxels, voxOX, voxOY, voxOZ, voxSize
+                    voxels, voxOX, voxOY, voxOZ, voxSize,
+                    windForce, rainIntensity, pPos3
                 );
             }
             

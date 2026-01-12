@@ -23,6 +23,9 @@ import net.minecraftforge.fml.common.Mod;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import net.minecraft.world.entity.EntityType;
 
 /**
  * 事件处理器 (修复版：加入定期强制刷新，解决地形改变后的幽灵方块问题)
@@ -36,6 +39,7 @@ public class EntityTickHandler {
     private static boolean errorLogged = false;
 
     private static final List<Entity> REUSABLE_ENTITY_LIST = new ArrayList<>(512);
+    private static final Map<EntityType<?>, Boolean> PROTECTED_CACHE = new HashMap<>();
     private static BlockPos lastVoxelOrigin = BlockPos.ZERO;
     private static String lastDimensionKey = "";
 
@@ -125,10 +129,36 @@ public class EntityTickHandler {
         int minY = vY + 2; int maxY = vY + vSize - 2;
         int minZ = vZ + 2; int maxZ = vZ + vSize - 2;
 
+        // --- 第一阶段：收集受保护实体（如女仆）的位置，建立安全区 ---
+        List<BlockPos> safetyZones = new ArrayList<>();
+        List<? extends String> protectedEntities = GPUAccelConfig.PROTECTED_ENTITIES.get();
+        double safetyRadius = GPUAccelConfig.INTERACTION_SAFETY_RADIUS.get();
+        double safetyRadiusSq = safetyRadius * safetyRadius;
+
+        // 仅在有保护需求时执行扫描
+        if (!protectedEntities.isEmpty() && safetyRadius > 0) {
+            for (Entity entity : level.getAllEntities()) {
+                if (isEntityProtected(entity.getType(), protectedEntities)) {
+                    safetyZones.add(entity.blockPosition());
+                }
+            }
+        }
+
         for (Entity entity : level.getAllEntities()) {
             if (entity instanceof Player) {
                 if (entity.getTags().contains("gpu_active")) entity.removeTag("gpu_active");
                 continue;
+            }
+
+            // 检查自身是否受保护 (复用缓存)
+            if (isEntityProtected(entity.getType(), protectedEntities)) {
+                 // 强制移除标签并重置状态，防止受保护实体卡在 GPU 模式
+                 if (entity.getTags().contains("gpu_active")) {
+                    entity.removeTag("gpu_active");
+                    entity.setNoGravity(false);
+                    entity.setDeltaMovement(0, -0.2, 0);
+                }
+                 continue; // 跳过此实体，不进行 GPU 加速
             }
 
             boolean isCandidate = false;
@@ -148,6 +178,32 @@ public class EntityTickHandler {
             else if (entity instanceof FlyingAnimal || (entity instanceof Animal && shouldUseSwarmAI((Animal) entity)) || entity instanceof Mob) isCandidate = true;
 
             if (!isCandidate) continue;
+
+            // --- 安全区检测 (Smart Exclusion) ---
+            boolean inSafetyZone = false;
+            if (!safetyZones.isEmpty()) {
+                double eX = entity.getX();
+                double eY = entity.getY();
+                double eZ = entity.getZ();
+                for (BlockPos zone : safetyZones) {
+                    if (zone.distToCenterSqr(eX, eY, eZ) < safetyRadiusSq) {
+                        inSafetyZone = true;
+                        break;
+                    }
+                }
+            }
+
+            if (inSafetyZone) {
+                // 在安全区内，强制回退 CPU，模拟“不在地图内”的处理逻辑
+                if (entity.getTags().contains("gpu_active")) {
+                    entity.removeTag("gpu_active");
+                    entity.setNoGravity(false);
+                    entity.setDeltaMovement(0, -0.2, 0);
+                    // 强制同步位置防止插值抖动 (可选，但推荐)
+                    entity.setPos(entity.getX(), entity.getY(), entity.getZ());
+                }
+                continue;
+            }
 
             // 范围筛选
             boolean insideMap = false;
@@ -225,5 +281,32 @@ public class EntityTickHandler {
                path.contains("pig") || path.contains("zombie") || path.contains("skeleton") ||
                path.contains("creeper") || path.contains("spider") ||
                path.contains("bird") || path.contains("insect") || path.contains("fly");
+    }
+
+    private static boolean isEntityProtected(EntityType<?> type, List<? extends String> protectedEntities) {
+        if (protectedEntities.isEmpty()) return false;
+
+        Boolean cachedProtected = PROTECTED_CACHE.get(type);
+        if (cachedProtected != null) return cachedProtected;
+
+        String id = null;
+        try {
+            var resourceLocation = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(type);
+            if (resourceLocation != null) {
+                id = resourceLocation.toString();
+            }
+        } catch (Exception ignored) {}
+
+        boolean isProtected = false;
+        if (id != null) {
+            for (String p : protectedEntities) {
+                if (id.contains(p)) {
+                    isProtected = true;
+                    break;
+                }
+            }
+        }
+        PROTECTED_CACHE.put(type, isProtected);
+        return isProtected;
     }
 }

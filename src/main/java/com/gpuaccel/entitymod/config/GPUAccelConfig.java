@@ -40,10 +40,24 @@ public class GPUAccelConfig {
     public static final ForgeConfigSpec.DoubleValue GROUND_FRICTION;
     public static final ForgeConfigSpec.DoubleValue RESTITUTION;
     
+    // 兼容性配置
+    public static final ForgeConfigSpec.ConfigValue<java.util.List<? extends String>> PROTECTED_ENTITIES;
+    public static final ForgeConfigSpec.DoubleValue INTERACTION_SAFETY_RADIUS;
+
     // 性能配置
     public static final ForgeConfigSpec.IntValue UPDATE_INTERVAL;
     
     static {
+        BUILDER.push("Compatibility Settings");
+        PROTECTED_ENTITIES = BUILDER
+            .comment("List of entity IDs or class names that should create a 'Safety Zone' around them.")
+            .comment("Entities within the safety radius of these protected entities will fallback to CPU processing.")
+            .defineList("protectedEntities", java.util.Arrays.asList("touhou_little_maid"), obj -> obj instanceof String);
+        INTERACTION_SAFETY_RADIUS = BUILDER
+            .comment("Radius (in blocks) around protected entities where GPU acceleration is disabled for other entities.")
+            .defineInRange("interactionSafetyRadius", 5.0, 0.0, 64.0);
+        BUILDER.pop();
+
         BUILDER.push("GPU Settings");
         ENABLE_GPU = BUILDER
             .comment("Enable GPU acceleration (requires OpenCL compatible device)")

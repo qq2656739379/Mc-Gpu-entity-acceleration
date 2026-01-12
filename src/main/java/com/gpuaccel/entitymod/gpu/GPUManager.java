@@ -59,7 +59,13 @@ public class GPUManager {
     private int attrCapacity = 0;
 
     // Stimulus Injection Buffers
-    private cl_mem stimPosMem, stimChannelMem, stimValueMem;
+    private cl_mem[] stimPosMems = new cl_mem[SWAP_SLOTS];
+    private cl_mem[] stimChannelMems = new cl_mem[SWAP_SLOTS];
+    private cl_mem[] stimValueMems = new cl_mem[SWAP_SLOTS];
+
+    private FloatBuffer[] stimPosBuffers = new FloatBuffer[SWAP_SLOTS];
+    private IntBuffer[] stimChannelBuffers = new IntBuffer[SWAP_SLOTS];
+    private FloatBuffer[] stimValueBuffers = new FloatBuffer[SWAP_SLOTS];
     private int stimCapacity = 0;
     
     // Pheromone Ping-Pong Buffers
@@ -337,24 +343,51 @@ public class GPUManager {
         if (!gpuAvailable || count == 0) return;
 
         if (count > stimCapacity) {
-            if (stimPosMem != null) { clReleaseMemObject(stimPosMem); clReleaseMemObject(stimChannelMem); clReleaseMemObject(stimValueMem); }
+            // Free all existing double buffers
+            for (int i = 0; i < SWAP_SLOTS; i++) {
+                if (stimPosMems[i] != null) clReleaseMemObject(stimPosMems[i]);
+                if (stimChannelMems[i] != null) clReleaseMemObject(stimChannelMems[i]);
+                if (stimValueMems[i] != null) clReleaseMemObject(stimValueMems[i]);
+
+                if (stimPosBuffers[i] != null) MemoryUtil.memFree(stimPosBuffers[i]);
+                if (stimChannelBuffers[i] != null) MemoryUtil.memFree(stimChannelBuffers[i]);
+                if (stimValueBuffers[i] != null) MemoryUtil.memFree(stimValueBuffers[i]);
+            }
+
             stimCapacity = count + 256;
-            stimPosMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 3 * 4, null, null);
-            stimChannelMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
-            stimValueMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
+
+            // Allocate new Direct Buffers and OpenCL buffers for all slots
+            for (int i = 0; i < SWAP_SLOTS; i++) {
+                stimPosBuffers[i] = MemoryUtil.memAllocFloat(stimCapacity * 3);
+                stimChannelBuffers[i] = MemoryUtil.memAllocInt(stimCapacity);
+                stimValueBuffers[i] = MemoryUtil.memAllocFloat(stimCapacity);
+
+                // Create buffers without copying host ptr, since we write immediately after
+                stimPosMems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 3 * 4, null, null);
+                stimChannelMems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
+                stimValueMems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
+            }
         }
 
-        clEnqueueWriteBuffer(commandQueue, stimPosMem, CL_FALSE, 0, (long)count * 3 * 4, Pointer.to(positions), 0, null, null);
-        clEnqueueWriteBuffer(commandQueue, stimChannelMem, CL_FALSE, 0, (long)count * 4, Pointer.to(channels), 0, null, null);
-        clEnqueueWriteBuffer(commandQueue, stimValueMem, CL_TRUE, 0, (long)count * 4, Pointer.to(values), 0, null, null);
+        // Use activeBuffer to select the current slot (double buffering)
+        int idx = activeBuffer;
+
+        // Fill buffers
+        stimPosBuffers[idx].clear().put(positions, 0, count * 3).flip();
+        stimChannelBuffers[idx].clear().put(channels, 0, count).flip();
+        stimValueBuffers[idx].clear().put(values, 0, count).flip();
+
+        clEnqueueWriteBuffer(commandQueue, stimPosMems[idx], CL_FALSE, 0, (long)count * 3 * 4, Pointer.to(stimPosBuffers[idx]), 0, null, null);
+        clEnqueueWriteBuffer(commandQueue, stimChannelMems[idx], CL_FALSE, 0, (long)count * 4, Pointer.to(stimChannelBuffers[idx]), 0, null, null);
+        clEnqueueWriteBuffer(commandQueue, stimValueMems[idx], CL_FALSE, 0, (long)count * 4, Pointer.to(stimValueBuffers[idx]), 0, null, null);
 
         // Execute Inject Kernel
         // void inject_stimuli(phero, pos, ch, val, count, ox, oy, oz, sxz, sy)
         int argIdx = 0;
         clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(targetBuffer));
-        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimPosMem));
-        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimChannelMem));
-        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimValueMem));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimPosMems[idx]));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimChannelMems[idx]));
+        clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(stimValueMems[idx]));
         clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{count}));
         clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{GPUManager.currentMapOrigin[0]}));
         clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{GPUManager.currentMapOrigin[1]}));
@@ -366,9 +399,9 @@ public class GPUManager {
         clEnqueueNDRangeKernel(commandQueue, injectKernel, 1, null, globalWorkSize, null, 0, null, null);
     }
     
-    public cl_mem getStimPosMem() { return stimPosMem; }
-    public cl_mem getStimChannelMem() { return stimChannelMem; }
-    public cl_mem getStimValueMem() { return stimValueMem; }
+    public cl_mem getStimPosMem() { return stimPosMems[activeBuffer]; }
+    public cl_mem getStimChannelMem() { return stimChannelMems[activeBuffer]; }
+    public cl_mem getStimValueMem() { return stimValueMems[activeBuffer]; }
 
     public cl_mem createBuffer(long flags, long size, Pointer ptr) {
         if (!gpuAvailable) return null;
@@ -420,9 +453,16 @@ public class GPUManager {
         if (attrTypeMem != null) clReleaseMemObject(attrTypeMem);
         if (beeStatesMem != null) clReleaseMemObject(beeStatesMem);
 
-        if (stimPosMem != null) clReleaseMemObject(stimPosMem);
-        if (stimChannelMem != null) clReleaseMemObject(stimChannelMem);
-        if (stimValueMem != null) clReleaseMemObject(stimValueMem);
+        // Cleanup Direct Buffers and cl_mems for stimuli
+        for (int i = 0; i < SWAP_SLOTS; i++) {
+            if (stimPosMems[i] != null) clReleaseMemObject(stimPosMems[i]);
+            if (stimChannelMems[i] != null) clReleaseMemObject(stimChannelMems[i]);
+            if (stimValueMems[i] != null) clReleaseMemObject(stimValueMems[i]);
+
+            if (stimPosBuffers[i] != null) MemoryUtil.memFree(stimPosBuffers[i]);
+            if (stimChannelBuffers[i] != null) MemoryUtil.memFree(stimChannelBuffers[i]);
+            if (stimValueBuffers[i] != null) MemoryUtil.memFree(stimValueBuffers[i]);
+        }
     }
 
     // Getters

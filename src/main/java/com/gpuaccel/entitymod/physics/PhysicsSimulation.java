@@ -31,7 +31,6 @@ public class PhysicsSimulation {
     
     // 性能监控
     private final PerformanceProfiler profiler = new PerformanceProfiler();
-    private int profileCounter = 0;
 
     // ================== GPU 资源管理 ==================
     // 预分配缓冲区容量
@@ -46,6 +45,10 @@ public class PhysicsSimulation {
     private cl_mem posMem;
     private cl_mem velMem;
     private cl_mem radiusMem;
+
+    // 异步管线状态
+    private boolean hasPendingFrame = false;
+    private int lastFrameEntityCount = 0;
 
     // ================== OpenCL 内核 ==================
 
@@ -99,18 +102,21 @@ public class PhysicsSimulation {
             float isFly  = params[pIdx + 3];
 
             // 1. 环境检测
+            // 检查脚底和身体中心
             char voxelAtBody = get_voxel(pos + (float3)(0, radius, 0), voxels, voxOX, voxOY, voxOZ, voxSize);
             char voxelAtFeet = get_voxel(pos + (float3)(0, 0.1f, 0), voxels, voxOX, voxOY, voxOZ, voxSize);
+            // 只要任何一部分在水中，就视为在水中
             bool inWater = (voxelAtBody == VOXEL_LIQUID || voxelAtFeet == VOXEL_LIQUID);
 
             // 2. 施加力 (重力 & 阻力)
             if (inWater) {
-                // 水中：浮力 + 高阻力
-                vel.y += (globalGravity * 0.3f) * dt; // 简单的反重力 (浮力)
-                vel *= 0.90f; // 强水阻
+                // 水中：强浮力 + 强阻力
+                // 浮力必须大于重力才能上浮。假设 heavy gravity，这里给 1.5 倍反向力 => 净上浮 0.5g
+                vel.y += (globalGravity * 1.5f) * dt;
+                vel *= 0.85f; // 强水阻，防止飞出水面
                 
-                // 如果在水里且向下沉，稍微减缓下沉速度
-                if (vel.y < -0.1f) vel.y *= 0.95f;
+                // 限制最大上浮速度
+                if (vel.y > 0.2f) vel.y = 0.2f;
             } else {
                 // 空中/地面
                 if (isFly < 0.5f) { // 非飞行生物
@@ -131,7 +137,6 @@ public class PhysicsSimulation {
             float3 nextPos = pos + vel * dt;
             
             // 4. 地形碰撞检测 (Voxel Collision)
-            // 简单检测：检测脚底、头顶和水平四个方向
             
             // A. 地面检测 (Ground)
             if (is_solid(nextPos, voxels, voxOX, voxOY, voxOZ, voxSize)) {
@@ -142,8 +147,6 @@ public class PhysicsSimulation {
                     if (vel.y < 0) vel.y = 0;
                     nextPos.y += 0.1f; // 挤上去
                     pos.y += 0.1f;
-                    // FIX: Remove upward velocity boost to prevent flying/hovering
-                    // vel.y += 2.0f * dt;
                 } else {
                     // 真的撞墙了 -> 简单的滑行处理 (Project Velocity)
                     float3 testX = (float3)(nextPos.x, pos.y, pos.z);
@@ -156,24 +159,27 @@ public class PhysicsSimulation {
                     
                     if (hitY) {
                         // 撞地/撞天花板
-                        vel.y = -vel.y * elast * 0.5f; // 反弹并衰减
-                        // 地面摩擦
-                        if (vel.y < 0.1f && vel.y > -0.1f) { 
-                             vel.x *= (1.0f - groundFric * dt);
-                             vel.z *= (1.0f - groundFric * dt);
+                        vel.y = -vel.y * elast * 0.2f; // 强衰减，防止弹跳
+
+                        // 地面强摩擦 (解决滑行问题)
+                        if (abs(vel.y) < 0.1f) {
+                             vel.x *= 0.6f; // 0.6 的保留率 = 强摩擦
+                             vel.z *= 0.6f;
+                             // 速度吸附：如果非常慢，直接归零
+                             if (abs(vel.x) < 0.05f) vel.x = 0;
+                             if (abs(vel.z) < 0.05f) vel.z = 0;
+                             if (abs(vel.y) < 0.05f) vel.y = 0;
                         }
                         nextPos.y = pos.y; // 重置 Y
                     }
                     if (hitX) {
                         vel.x = -vel.x * elast;
                         nextPos.x = pos.x;
-                        // Damping on collision to prevent sticking/jittering
                         vel.x *= 0.5f;
                     }
                     if (hitZ) {
                         vel.z = -vel.z * elast;
                         nextPos.z = pos.z;
-                        // Damping on collision
                         vel.z *= 0.5f;
                     }
                 }
@@ -283,7 +289,48 @@ public class PhysicsSimulation {
             ensureBuffers(count);
             profiler.markPackStart();
 
-            // 1. 填充 Host Buffers
+            // === 异步管线 Step 1: 读取上一帧的结果 (Readback) ===
+            // 只有当有挂起的帧且实体数量未发生变化时才读取，否则丢弃上一帧结果以防错位
+            if (hasPendingFrame && count == lastFrameEntityCount) {
+                // 读回数据
+                gpuManager.readBuffer(posMem, (long)count * 3 * 4, Pointer.to(posBuffer));
+                gpuManager.readBuffer(velMem, (long)count * 3 * 4, Pointer.to(velBuffer));
+
+                // 应用回实体
+                for (int i = 0; i < count; i++) {
+                    Entity e = entities.get(i);
+                    float nx = posBuffer.get(i*3);
+                    float ny = posBuffer.get(i*3+1);
+                    float nz = posBuffer.get(i*3+2);
+                    float vx = velBuffer.get(i*3);
+                    float vy = velBuffer.get(i*3+1);
+                    float vz = velBuffer.get(i*3+2);
+
+                    if (!Float.isNaN(nx) && !Float.isNaN(vx)) {
+                        double distSq = e.distanceToSqr(nx, ny, nz);
+                        // 距离校验：如果GPU计算位置偏离太远（瞬移），则忽略
+                        if (distSq < 16.0) {
+                            if (distSq > 0.0001) {
+                                e.setPos(nx, ny, nz);
+                            }
+                            e.setDeltaMovement(vx, vy, vz);
+                            e.hasImpulse = true;
+                            // 宽松的 OnGround 判定，防止鸡疯狂拍翅膀
+                            // 只要垂直速度非常小且本来就在地面附近，就算 OnGround
+                            boolean isVertStable = Math.abs(vy) < 0.05f;
+                            e.setOnGround(isVertStable);
+                        }
+                    }
+                }
+            } else {
+                // 管道重置：第一帧或实体列表变动，不读取，仅写入
+                hasPendingFrame = false;
+            }
+
+            // === 异步管线 Step 2: 写入当前帧数据 (Upload) ===
+            // 必须重新填充 Buffer，因为上面的 Readback 覆盖了它们
+            posBuffer.clear(); velBuffer.clear(); radiusBuffer.clear();
+
             for (int i = 0; i < count; i++) {
                 Entity e = entities.get(i);
                 Vec3 pos = e.position();
@@ -300,12 +347,11 @@ public class PhysicsSimulation {
                 
                 radiusBuffer.put(i*4 + 0, width * 0.5f);
                 radiusBuffer.put(i*4 + 1, mass);
-                radiusBuffer.put(i*4 + 2, 0.5f); // restitution
+                radiusBuffer.put(i*4 + 2, 0.5f);
                 radiusBuffer.put(i*4 + 3, isFly);
             }
             posBuffer.position(0); velBuffer.position(0); radiusBuffer.position(0);
 
-            // 2. 上传到 GPU - 修复：使用 Pointer.to(buffer) 而不是 memAddress
             gpuManager.writeBuffer(posMem, (long)count * 3 * 4, Pointer.to(posBuffer));
             gpuManager.writeBuffer(velMem, (long)count * 3 * 4, Pointer.to(velBuffer));
             gpuManager.writeBuffer(radiusMem, (long)count * 4 * 4, Pointer.to(radiusBuffer));
@@ -315,9 +361,9 @@ public class PhysicsSimulation {
                 VoxelManager.clearDirty();
             }
 
+            // === 异步管线 Step 3: 发送计算指令 (Compute) ===
             profiler.markComputeStart();
 
-            // 3. 执行 Physics Update Kernel
             long[] globalWorkSize = new long[]{count};
             
             clSetKernelArg(physicsKernel, 0, Sizeof.cl_mem, Pointer.to(posMem));
@@ -336,7 +382,6 @@ public class PhysicsSimulation {
 
             gpuManager.executeKernel(physicsKernel, 1, globalWorkSize, null);
 
-            // 4. 执行 Collision Kernel
             clSetKernelArg(collisionKernel, 0, Sizeof.cl_mem, Pointer.to(posMem));
             clSetKernelArg(collisionKernel, 1, Sizeof.cl_mem, Pointer.to(velMem));
             clSetKernelArg(collisionKernel, 2, Sizeof.cl_mem, Pointer.to(radiusMem));
@@ -345,38 +390,16 @@ public class PhysicsSimulation {
 
             gpuManager.executeKernel(collisionKernel, 1, globalWorkSize, null);
 
-            profiler.markUnpackStart();
+            // 标记下一帧可以读取
+            hasPendingFrame = true;
+            lastFrameEntityCount = count;
 
-            // 5. 读回数据 - 修复：使用 Pointer.to(buffer) 而不是 memAddress
-            gpuManager.readBuffer(posMem, (long)count * 3 * 4, Pointer.to(posBuffer));
-            gpuManager.readBuffer(velMem, (long)count * 3 * 4, Pointer.to(velBuffer));
-
-            // 6. 应用回实体
-            for (int i = 0; i < count; i++) {
-                Entity e = entities.get(i);
-                float nx = posBuffer.get(i*3);
-                float ny = posBuffer.get(i*3+1);
-                float nz = posBuffer.get(i*3+2);
-                float vx = velBuffer.get(i*3);
-                float vy = velBuffer.get(i*3+1);
-                float vz = velBuffer.get(i*3+2);
-
-                if (!Float.isNaN(nx) && !Float.isNaN(vx)) {
-                    double distSq = e.distanceToSqr(nx, ny, nz);
-                    if (distSq > 0.01) {
-                        e.setPos(nx, ny, nz);
-                    }
-                    e.setDeltaMovement(vx, vy, vz);
-                    e.hasImpulse = true;
-                    e.setOnGround(vy == 0);
-                }
-            }
-            
             profiler.markFinish();
             profiler.logIfReady(60, count);
 
         } catch (Exception e) {
             LOGGER.error("GPU Physics Error", e);
+            hasPendingFrame = false; // 出错重置
             updateCPU(entities, dt);
         }
     }
@@ -395,6 +418,9 @@ public class PhysicsSimulation {
             posMem = gpuManager.createBuffer(CL_MEM_READ_WRITE, (long)newCap * 3 * 4, null);
             velMem = gpuManager.createBuffer(CL_MEM_READ_WRITE, (long)newCap * 3 * 4, null);
             radiusMem = gpuManager.createBuffer(CL_MEM_READ_ONLY, (long)newCap * 4 * 4, null);
+
+            // 扩容后必须重置管线，因为旧 Buffer 已经释放，里面的数据没了
+            hasPendingFrame = false;
         }
     }
 

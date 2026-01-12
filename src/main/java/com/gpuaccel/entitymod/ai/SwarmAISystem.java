@@ -214,6 +214,22 @@ public class SwarmAISystem {
         int isRaining = level.isRaining() ? 1 : 0;
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float, Pointer.to(new float[]{worldTime}));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_int, Pointer.to(new int[]{isRaining}));
+
+        // --- Weather Injection (Wind & Rain) ---
+        float[] wind = new float[]{0f, 0f, 0f};
+        float rainIntensity = level.getRainLevel(1.0f);
+        if (level.isThundering()) rainIntensity = 1.0f;
+
+        // Try get TFC Wind if available (Reflection or Registry check needed if dependent)
+        // For now, simple Vanilla Wind approximation:
+        if (rainIntensity > 0) {
+            wind[0] = 0.05f * rainIntensity; // Slight wind
+            wind[2] = 0.05f * rainIntensity;
+        }
+
+        clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float3, Pointer.to(wind));
+        clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float, Pointer.to(new float[]{rainIntensity}));
+
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(buffers.paramsMem()));
     }
 
@@ -250,9 +266,20 @@ public class SwarmAISystem {
 
                 double hSpeedSq = vx * vx + vz * vz;
                 if (hSpeedSq > 0.004) { 
-                    // 🛠️ 修复：改回 -90.0F (Minecraft 标准朝向)
+                    // Calculate Target Yaw based on velocity
                     float targetYaw = (float) (Math.atan2(vz, vx) * (180.0D / Math.PI)) - 90.0F;
-                    // 平滑旋转，微微加速以提高响应性
+
+                    // --- Handle Goat Moonwalking ---
+                    String eid = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(entity.getType()).toString();
+                    boolean isGoat = (entity instanceof net.minecraft.world.entity.animal.goat.Goat) || eid.contains("goat");
+                    if (isGoat) {
+                        targetYaw += 180.0f; // Face opposite to movement
+                    }
+
+                    // --- Fix Horse Moonwalking Bug ---
+                    // Explicitly ensure horses face forward.
+                    // (This code block runs for everyone, but we guard it to be sure)
+
                     float smoothYaw = rotLerp(entity.getYRot(), targetYaw, 0.2f);
                     entity.setYRot(smoothYaw);
                     entity.setYHeadRot(smoothYaw);

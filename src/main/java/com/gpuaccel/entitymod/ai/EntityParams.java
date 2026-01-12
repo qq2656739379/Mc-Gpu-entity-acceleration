@@ -9,6 +9,9 @@ import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.monster.*;
 import net.minecraft.world.entity.animal.*;
+import net.minecraft.world.entity.animal.goat.Goat;
+import net.minecraft.world.entity.animal.horse.AbstractHorse;
+import net.minecraft.world.entity.animal.horse.Horse;
 import net.minecraft.world.entity.ambient.Bat;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
@@ -35,17 +38,13 @@ public class EntityParams {
         p[7] = 0.42f; // Jump Height
         p[8] = 1.0f;  // Mass
         p[9] = -0.5f; // FOV
-        p[10] = 0.0f; // Familiarity (Placeholder)
         
-        // Get Behavior Profile
-        String entityId = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
-        EntityBehaviorRegistry.BehaviorProfile profile = EntityBehaviorRegistry.getProfile(entityId);
-        p[11] = (float)profile.behaviorId(); // Store Behavior ID
+        // 10. Familiarity (from TFC or Vanilla)
+        p[10] = getTFCFamiliarity(e);
 
-        // TFC Familiarity Check (Mock logic - real implementation needs TFC API or NBT read)
-        if (e.getTags().contains("familiar")) {
-            p[10] = 1.0f;
-        }
+        // 11. Flags (Marine, Goat, Horse)
+        int flags = getFlags(e, type);
+        p[11] = (float)flags;
 
         fillPhysicsParams(e, p);
 
@@ -136,12 +135,58 @@ public class EntityParams {
     }
 
     private static void fillPhysicsParams(Entity e, float[] p) {
-        // ... (保持之前的物理参数填充逻辑不变) ...
         String id = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
         if (id.contains("tfc") || id.contains("firmalife")) {
              // 示例参数调整
              p[0] = 0.22f; // 稍微降低速度，看起来更自然
              if (id.contains("bear") || id.contains("lion")) p[0] = 0.35f;
         }
+    }
+
+    private static float getTFCFamiliarity(Entity e) {
+        // TFC Familiarity is usually stored in NBT or Capability.
+        // Since we don't have direct API access here, we check NBT if available.
+        // Note: For safe NBT reading without direct dependency, we rely on standard NBT structure.
+        if (e.getPersistentData().contains("Familiarity")) {
+            return e.getPersistentData().getFloat("Familiarity");
+        }
+        if (e.getPersistentData().contains("familiarity")) {
+            return e.getPersistentData().getFloat("familiarity");
+        }
+        // Fallback: Check tags
+        if (e.getTags().contains("familiar")) return 1.0f;
+
+        // Fallback: Vanilla Tame
+        if (e instanceof TamableAnimal t && t.isTame()) return 1.0f;
+
+        return 0.0f;
+    }
+
+    private static int getFlags(Entity e, int type) {
+        int flags = 0;
+        String id = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
+
+        // Bit 0: Marine (Swim/Fly underground)
+        boolean isMarine = (e instanceof WaterAnimal) ||
+                           (e instanceof net.minecraft.world.entity.animal.Squid) ||
+                           id.contains("squid") ||
+                           id.contains("fish") ||
+                           id.contains("cod") ||
+                           id.contains("salmon") ||
+                           type == TYPE_SWIMMER;
+
+        if (isMarine) flags |= 1;
+
+        // Bit 1: Goat (Moonwalking)
+        if (e instanceof Goat || id.contains("goat")) {
+            flags |= 2;
+        }
+
+        // Bit 2: Horse (Fix Moonwalking Bug)
+        if (e instanceof Horse || e instanceof AbstractHorse || id.contains("horse") || id.contains("donkey") || id.contains("mule")) {
+            flags |= 4;
+        }
+
+        return flags;
     }
 }

@@ -55,9 +55,13 @@ public class TFCLogic {
             __global const float* params,
             __global const float* pheromones,
             int mapOX, int mapOY, int mapOZ, int sizeXZ, int sizeY,
-            __global const char* voxels, int voxOX, int voxOY, int voxOZ, int voxSize
+            __global const char* voxels, int voxOX, int voxOY, int voxOZ, int voxSize,
+            float3 windForce
         ) {
             float3 acc = (float3)(0,0,0);
+
+            // Apply Wind
+            acc += windForce;
 
             // 1. Diet & Hunger (Seek Food)
             int foodChannel = -1;

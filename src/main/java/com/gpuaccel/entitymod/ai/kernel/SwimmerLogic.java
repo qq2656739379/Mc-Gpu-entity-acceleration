@@ -10,7 +10,8 @@ public class SwimmerLogic {
             __global const char* voxels, int mapOX, int mapOY, int mapOZ, int mapSize,
             __global float* prevPositions, __global int* stuckTimer,
             bool lodActive,
-            float3 playerPos
+            float3 playerPos,
+            float3 windForce
         ) {
             int pBase = gid * 12;
             float maxSpeed       = params[pBase + 0];
@@ -20,11 +21,21 @@ public class SwimmerLogic {
             float alignmentWeight = params[pBase + 3];
             float cohesionWeight  = params[pBase + 4];
             float mass            = params[pBase + 8];
+            int flags            = (int)params[pBase + 11];
+
+            bool isMarine = (flags & 1) != 0;
             
             if (mass < 0.1f) mass = 0.1f; // 🛡️ 安全防御
 
             char voxelAtBody = get_voxel(pos, voxels, mapOX, mapOY, mapOZ, mapSize);
             bool inWater = (voxelAtBody == VOXEL_LIQUID);
+
+            // Marine "Fly-Swim" Logic (Swim in air, No gravity underground)
+            if (isMarine) {
+                inWater = true; // Pretend we are always in water
+                // Add Y drag manually since we aren't using the !inWater gravity block
+                vel *= 0.92f;
+            }
 
             if (!inWater) {
                 vel.y -= 0.08f; 
@@ -40,12 +51,18 @@ public class SwimmerLogic {
             }
 
             float3 acc = (float3)(0);
-            vel *= 0.92f; vel.y -= 0.001f; 
+            if (!isMarine) {
+                vel *= 0.92f; vel.y -= 0.001f;
 
-            char vUp = get_voxel(pos + (float3)(0, 1.0f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
-            if (vUp == VOXEL_AIR) acc.y -= 0.05f / mass; 
-            char vDown = get_voxel(pos + (float3)(0, -1.0f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
-            if (vDown == VOXEL_SOLID) acc.y += 0.05f / mass; 
+                char vUp = get_voxel(pos + (float3)(0, 1.0f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
+                if (vUp == VOXEL_AIR) acc.y -= 0.05f / mass;
+                char vDown = get_voxel(pos + (float3)(0, -1.0f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
+                if (vDown == VOXEL_SOLID) acc.y += 0.05f / mass;
+            }
+
+            // Apply Wind (reduced effect in water, full effect for Marine flyer)
+            if (isMarine) acc += windForce * 0.5f;
+            else acc += windForce * 0.1f;
 
             if (!lodActive) {
                 float noise = sin(dot(pos, (float3)(0.3f, 0.7f, 0.4f)) + time * 0.3f + (float)gid);

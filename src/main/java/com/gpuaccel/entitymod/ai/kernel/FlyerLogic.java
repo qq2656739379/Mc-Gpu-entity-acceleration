@@ -12,7 +12,9 @@ public class FlyerLogic {
             bool lodActive,
             // 🚀 新增: 费洛蒙参数 (修复 expected 28, have 34 错误)
             __global const float* pheromones, int pheroOX, int pheroOY, int pheroOZ, int pSizeXZ, int pSizeY,
-            __global const char* voxels, int voxOX, int voxOY, int voxOZ, int voxSize
+            __global const char* voxels, int voxOX, int voxOY, int voxOZ, int voxSize,
+            // 🚀 新增: 环境参数
+            float3 windForce, float rainIntensity, float3 playerPos
         ) {
             int pBase = gid * 12;
             float maxSpeed       = params[pBase + 0];
@@ -24,6 +26,7 @@ public class FlyerLogic {
             float gravity        = params[pBase + 5]; 
             float mass           = params[pBase + 8];
             float fovCos         = params[pBase + 9];
+            float familiarity    = params[pBase + 10]; // Favorability
 
             if (mass < 0.1f) mass = 0.1f; // 🛡️ 安全防御
 
@@ -42,6 +45,17 @@ public class FlyerLogic {
             } else stuckTimer[gid] = 0;
 
             float3 acc = (float3)(0);
+
+            // Apply Wind
+            acc += windForce;
+
+            // Apply Favorability (Seek Player)
+            if (!lodActive && familiarity > 0.0f) {
+                float distToPlayerSq = dot(playerPos - pos, playerPos - pos);
+                if (distToPlayerSq < 6400.0f && distToPlayerSq > 16.0f) { // Within 80 blocks, not too close
+                     acc += safe_normalize(playerPos - pos) * familiarity * 2.0f / mass;
+                }
+            }
 
             // 1. Target
             if (!lodActive && (state == STATE_IDLE || state == STATE_RETURN)) {

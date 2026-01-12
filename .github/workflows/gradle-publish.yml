@@ -26,4 +26,11 @@ jobs:
       
     - name: Build with Gradle
       run: ./gradlew build
-      # 注意：这里去掉了 publish 步骤，只进行编译和测试
+      
+    # 👇👇👇 必须加上这一段，构建成功后才能下载文件 👇👇👇
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: My-Build-File  # 你下载时的压缩包名字
+        path: build/libs/*.jar  # 自动抓取生成的 jar 文件
+        retention-days: 3    # 文件只保留3天（你可以改长一点）

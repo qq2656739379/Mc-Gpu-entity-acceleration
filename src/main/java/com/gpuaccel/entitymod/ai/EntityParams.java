@@ -138,8 +138,8 @@ public class EntityParams {
         String id = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
         if (id.contains("tfc") || id.contains("firmalife")) {
              // 示例参数调整
-             p[0] = 0.22f; // 稍微降低速度，看起来更自然
-             if (id.contains("bear") || id.contains("lion")) p[0] = 0.35f;
+             p[0] = 0.18f; // Reduced speed to fix hyperactivity (was 0.22f)
+             if (id.contains("bear") || id.contains("lion")) p[0] = 0.30f; // Slightly faster predators
         }
     }
 

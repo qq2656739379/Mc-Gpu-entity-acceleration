@@ -80,18 +80,59 @@ public class SwarmAISystem {
             cleanupTickCounter = 0;
         }
 
-        List<Entity> filteredEntities = new ArrayList<>();
-        List<Integer> entityTypes = new ArrayList<>();
-        filterEntities(entities, filteredEntities, entityTypes);
+        List<Entity> candidateEntities = new ArrayList<>();
+        List<Integer> candidateTypes = new ArrayList<>();
+        // 1. Initial Type Filter
+        filterEntities(entities, candidateEntities, candidateTypes);
 
-        if (filteredEntities.isEmpty()) return;
-        int entityCount = filteredEntities.size();
+        if (candidateEntities.isEmpty()) return;
 
+        // 2. Proximity Filter (3x3 Chunks around Players)
+        List<Entity> nearEntities = new ArrayList<>();
+        List<Integer> nearTypes = new ArrayList<>();
+        List<Entity> farEntities = new ArrayList<>();
+        List<Integer> farTypes = new ArrayList<>(); // kept for completeness, though likely unused
+
+        // Get player chunk positions
+        Set<Long> activeChunks = new HashSet<>();
+        for (Player player : level.players()) {
+            int pX = player.blockPosition().getX() >> 4;
+            int pZ = player.blockPosition().getZ() >> 4;
+            for (int x = -1; x <= 1; x++) {
+                for (int z = -1; z <= 1; z++) {
+                    activeChunks.add(net.minecraft.world.level.ChunkPos.asLong(pX + x, pZ + z));
+                }
+            }
+        }
+
+        for (int i = 0; i < candidateEntities.size(); i++) {
+            Entity e = candidateEntities.get(i);
+            int cx = e.blockPosition().getX() >> 4;
+            int cz = e.blockPosition().getZ() >> 4;
+            long chunkKey = net.minecraft.world.level.ChunkPos.asLong(cx, cz);
+
+            if (activeChunks.contains(chunkKey)) {
+                nearEntities.add(e);
+                nearTypes.add(candidateTypes.get(i));
+            } else {
+                farEntities.add(e);
+                farTypes.add(candidateTypes.get(i));
+            }
+        }
+
+        // 3. Fallback for Far Entities (Reset state)
+        if (!farEntities.isEmpty()) {
+            fallbackToCPU(level, farEntities, farTypes);
+        }
+
+        int entityCount = nearEntities.size();
         if (!shouldRunOnGPU(entityCount)) {
-            fallbackToCPU(level, filteredEntities, entityTypes);
+            fallbackToCPU(level, nearEntities, nearTypes);
             return;
         }
-        dispatchToGPU(level, filteredEntities, entityTypes);
+
+        // 4. Dispatch Near Entities
+        dispatchToGPU(level, nearEntities, nearTypes);
     }
 
     private void dispatchToGPU(ServerLevel level, List<Entity> filteredEntities, List<Integer> entityTypes) {

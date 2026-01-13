@@ -162,13 +162,13 @@ public class PhysicsSimulation {
                         vel.y = -vel.y * elast * 0.2f; // 强衰减，防止弹跳
 
                         // 地面强摩擦 (解决滑行问题)
-                        if (abs(vel.y) < 0.1f) {
+                        if (fabs(vel.y) < 0.1f) {
                              vel.x *= 0.6f; // 0.6 的保留率 = 强摩擦
                              vel.z *= 0.6f;
                              // 速度吸附：如果非常慢，直接归零
-                             if (abs(vel.x) < 0.05f) vel.x = 0;
-                             if (abs(vel.z) < 0.05f) vel.z = 0;
-                             if (abs(vel.y) < 0.05f) vel.y = 0;
+                             if (fabs(vel.x) < 0.05f) vel.x = 0;
+                             if (fabs(vel.z) < 0.05f) vel.z = 0;
+                             if (fabs(vel.y) < 0.05f) vel.y = 0;
                         }
                         nextPos.y = pos.y; // 重置 Y
                     }

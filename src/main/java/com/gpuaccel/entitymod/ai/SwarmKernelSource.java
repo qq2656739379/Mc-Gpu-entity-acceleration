@@ -118,6 +118,59 @@ public class SwarmKernelSource {
         }
     """;
 
+    // --- Helper for Flow Field Lookup ---
+    private static final String FLOW_LOOKUP = """
+        #define AI_GENERIC       0
+        #define AI_PREDATOR      1
+        #define AI_LIVESTOCK     2
+        #define AI_PREY_SKITTISH 3
+        #define AI_DEFENSIVE     4
+        #define AI_ZOMBIE        5
+
+        float3 get_flow_force(
+            float3 pos, int aiType,
+            __global float4* ffPlayer,
+            __global float4* ffLivestock,
+            __global float4* ffFood,
+            int ox, int oy, int oz, int size
+        ) {
+            int ix = (int)floor(pos.x) - ox;
+            int iy = (int)floor(pos.y) - oy;
+            int iz = (int)floor(pos.z) - oz;
+            if (ix < 0 || ix >= size || iy < 0 || iy >= size || iz < 0 || iz >= size) return (float3)(0);
+
+            int idx = ix + iz*size + iy*size*size;
+
+            // Strategy Switch
+            // Note: Vector fields are float4, .xyz is direction.
+
+            if (aiType == AI_ZOMBIE) {
+                return ffPlayer[idx].xyz;
+            }
+            else if (aiType == AI_PREDATOR) {
+                // If close to player? We don't know player dist here easily without passing it.
+                // Assuming simple priority: Player > Livestock
+                float3 toPlayer = ffPlayer[idx].xyz;
+                if (length(toPlayer) > 0.01f) return toPlayer;
+                return ffLivestock[idx].xyz;
+            }
+            else if (aiType == AI_LIVESTOCK) {
+                return ffFood[idx].xyz;
+            }
+            else if (aiType == AI_PREY_SKITTISH) {
+                // Flee from player
+                float3 toPlayer = ffPlayer[idx].xyz;
+                if (length(toPlayer) > 0.01f) return -toPlayer; // Run away!
+                return ffFood[idx].xyz;
+            }
+            else if (aiType == AI_DEFENSIVE) {
+                return ffFood[idx].xyz; // Default to food until angry (Angry logic needs state passed)
+            }
+
+            return (float3)(0);
+        }
+    """;
+
     private static final String MAIN_ENTRY = """
         __kernel void calculateSwarmBehavior(
             __global const float* positions,     
@@ -140,7 +193,11 @@ public class SwarmKernelSource {
             const float attractionForce, const float arriveRadius, const float gatherChance, const float hoverFreq, const float hoverAmp,
             const float worldTime, const int isRaining,
             const float3 windForce, const float rainIntensity,
-            __global const float* params
+            __global const float* params,
+            // New Flow Field Buffers
+            __global float4* ffPlayer,
+            __global float4* ffLivestock,
+            __global float4* ffFood
         ) {
             int gid = get_global_id(0);
             if (gid >= entityCount) return;
@@ -158,37 +215,24 @@ public class SwarmKernelSource {
             __global const float* myParams = &params[gid * 12];
 
             // Extract Behavior ID (packed in params[11])
-            int behaviorID = (int)myParams[11];
+            float packedAI = myParams[11];
+            int aiType = (int)packedAI; // Integer part is Type
 
             // TFC Logic Override (if behaviorID is set)
-            if (behaviorID > 0 && !lodActive) {
-                // Use TFC Logic first to get desired direction
-                float3 desiredVel = update_tfc_animal(
-                    gid, behaviorID, pos, vel,
-                    myParams, pheromones,
-                    mapOX, mapOY, mapOZ, pSizeXZ, pSizeY,
-                    voxels, voxOX, voxOY, voxOZ, voxSize,
-                    windForce
-                );
-
-                // Then apply Walker/Swimmer physics constraints on top
-                // We do this by blending or just feeding the desiredVel into the physics solver
-                // For simplicity, we assume update_walker handles the collision/gravity,
-                // so we need update_walker to accept 'desiredVel' bias.
-                // But update_walker is hardcoded to use internal logic.
-                // Hack: We blend TFC desired velocity into 'vel' before calling update_walker
-
-                vel = mix(vel, desiredVel, 0.2f); // 20% influence per tick
-            }
+            // (Leaving TFC logic separate for now, Flow Fields apply to WalkerLogic)
 
             if (type == 4) { // WALKER
+                // Sample Flow Field
+                float3 flowDir = get_flow_force(pos, aiType, ffPlayer, ffLivestock, ffFood, voxOX, voxOY, voxOZ, voxSize);
+
                 finalVel = update_walker(
                     gid, idx, type, pos, vel, time, 
                     positions, velocities, entityCount, entityTypes, 
                     myParams,
                     voxels, voxOX, voxOY, voxOZ, voxSize,
                     prevPositions, stuckTimer, lodActive, pPos3,
-                    windForce
+                    windForce,
+                    flowDir // Pass Flow Vector
                 );
             }
             else if (type == 5) { // SWIMMER
@@ -241,9 +285,10 @@ public class SwarmKernelSource {
                     int volume = pSizeXZ * pSizeXZ * pSizeY;
 
                     // Determine what scent I emit
+                    // Reuse aiType roughly
                     int emitChannel = -1;
-                    if (behaviorID == 2) emitChannel = 4; // Predator emits Predator Scent
-                    else if (behaviorID == 3 || behaviorID == 1) emitChannel = 5; // Prey emits Prey Scent
+                    if (aiType == AI_PREDATOR) emitChannel = 4; // Predator emits Predator Scent
+                    else if (aiType == AI_LIVESTOCK || aiType == AI_PREY_SKITTISH) emitChannel = 5; // Prey emits Prey Scent
 
                     if (emitChannel != -1) {
                          // Write to output map (trail)
@@ -266,6 +311,7 @@ public class SwarmKernelSource {
                SwimmerLogic.SRC + "\n" + 
                INJECT_SRC + "\n" +
                DIFFUSION_SRC + "\n" +
+               FLOW_LOOKUP + "\n" +
                MAIN_ENTRY;
     }
 }

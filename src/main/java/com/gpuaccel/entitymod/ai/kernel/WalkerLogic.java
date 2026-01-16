@@ -65,7 +65,8 @@ public class WalkerLogic {
             __global float* prevPositions, __global int* stuckTimer,
             bool lodActive,
             float3 playerPos,
-            float3 windForce
+            float3 windForce,
+            float3 flowFieldDir // New Input: Flow Field Vector
         ) {
             int pBase = gid * 12; 
             float maxSpeed    = params[pBase + 0];
@@ -81,7 +82,7 @@ public class WalkerLogic {
 
             float distToGround = cast_ray(pos, (float3)(0, -1, 0), 4.0f, voxels, mapOX, mapOY, mapOZ, mapSize);
             float distToCeiling = cast_ray(pos, (float3)(0, 1, 0), 4.0f, voxels, mapOX, mapOY, mapOZ, mapSize);
-            // 🚀 核心修复：放宽接地判定，允许最多 2.0f 的“空踏”距离
+
             bool centerGrounded = (distToGround < 2.0f);
             bool isSolidGround = (distToGround < 0.6f);
             bool lowCeiling = (distToCeiling < 2.0f);
@@ -95,6 +96,20 @@ public class WalkerLogic {
                 targetDir = normalize(goalPos - pos);
                 if (commandState > 1.5f) speedMult = 2.0f;
                 if (distance(pos, goalPos) < 1.0f) shouldMove = false;
+            }
+
+            // 🚀 Flow Field Override
+            // If we have a strong flow vector, and NOT in Panic mode (State 2.0),
+            // mix it in or replace targetDir.
+            // If flowFieldDir is zero, we rely on CPU (targetDir).
+            // Panic mode (2.0) usually overrides everything to flee.
+            if (length(flowFieldDir) > 0.1f && commandState < 1.9f) {
+                shouldMove = true;
+                // Blend Flow Field with CPU target? Or just use Flow Field?
+                // Flow Field is "Intelligent Pathfinding". CPU target is "Straight Line".
+                // So Flow Field should dominate.
+                targetDir = normalize(flowFieldDir);
+                // Flow field implies walking, so we keep speed normal unless urgency is encoded.
             }
 
             // --- 运动层 (A*) ---
@@ -176,7 +191,7 @@ public class WalkerLogic {
                 stuckTimer[gid] = 0;
             }
 
-            return limit_vec(vel, maxSpeed * 3.0f); // 提高最大速度上限，防止被截断
+            return limit_vec(vel, maxSpeed * 3.0f);
         }
     """;
 }

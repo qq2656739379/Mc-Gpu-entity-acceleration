@@ -57,6 +57,8 @@ public class PhysicsSimulation {
         #define VOXEL_AIR 0
         #define VOXEL_SOLID 1
         #define VOXEL_LIQUID 2
+        #define VOXEL_FENCE 3
+        #define VOXEL_DANGER 4
         
         char get_voxel(float3 p, __global const char* voxels, int oX, int oY, int oZ, int size) {
             int ix = (int)floor(p.x) - oX;
@@ -69,7 +71,10 @@ public class PhysicsSimulation {
         }
         
         bool is_solid(float3 p, __global const char* voxels, int oX, int oY, int oZ, int size) {
-            return get_voxel(p, voxels, oX, oY, oZ, size) == VOXEL_SOLID;
+            char v = get_voxel(p, voxels, oX, oY, oZ, size);
+            // Solid, Fence, Danger are all considered physical colliders for basic physics
+            // We treat Fence and Danger as Solid for basic movement blocking
+            return (v == VOXEL_SOLID || v == VOXEL_FENCE || v == VOXEL_DANGER);
         }
     """;
 
@@ -101,31 +106,45 @@ public class PhysicsSimulation {
             float elast  = params[pIdx + 2]; // 弹性
             float isFly  = params[pIdx + 3];
 
-            // 1. 环境检测
-            // 检查脚底和身体中心
+            // 1. 获取当前 Voxel
             char voxelAtBody = get_voxel(pos + (float3)(0, radius, 0), voxels, voxOX, voxOY, voxOZ, voxSize);
             char voxelAtFeet = get_voxel(pos + (float3)(0, 0.1f, 0), voxels, voxOX, voxOY, voxOZ, voxSize);
-            // 只要任何一部分在水中，就视为在水中
+
+            // 2. 状态判断 (Strict State Machine)
             bool inWater = (voxelAtBody == VOXEL_LIQUID || voxelAtFeet == VOXEL_LIQUID);
 
-            // 2. 施加力 (重力 & 阻力)
+            // 3. 施加力
             if (inWater) {
-                // 水中：强浮力 + 强阻力
-                // 浮力必须大于重力才能上浮。假设 heavy gravity，这里给 1.5 倍反向力 => 净上浮 0.5g
-                vel.y += (globalGravity * 1.5f) * dt;
-                vel *= 0.85f; // 强水阻，防止飞出水面
+                // === UNDERWATER PHYSICS ===
+                // Buoyancy: Only apply if ACTUALLY in water
+                // Gravity (down) + Buoyancy (up)
+                // Assuming density > air, so we apply net upward force if neutral buoyant
+
+                // For 'flying fish' fix: If they leave water, this block MUST NOT run.
+
+                // Standard Buoyancy > Gravity
+                float buoyancy = globalGravity * 1.5f;
+                vel.y += buoyancy * dt;
+
+                // High Drag (Water Resistance)
+                vel *= 0.85f;
                 
-                // 限制最大上浮速度
+                // Cap upward velocity to prevent shooting out of water
                 if (vel.y > 0.2f) vel.y = 0.2f;
+
             } else {
-                // 空中/地面
-                if (isFly < 0.5f) { // 非飞行生物
-                    vel.y -= globalGravity * dt;
-                } else {
-                    vel.y -= globalGravity * 0.1f * dt; // 飞行生物受微重力
+                // === AIR PHYSICS ===
+                // Gravity always applies here
+                float grav = globalGravity;
+
+                if (isFly > 0.5f) {
+                     // Flying creatures get reduced gravity
+                     grav *= 0.1f;
                 }
                 
-                // 空气阻力
+                vel.y -= grav * dt;
+
+                // Air Resistance (Low)
                 float speed = length(vel);
                 if (speed > 0.001f) {
                     float drag = airRes * speed * speed;
@@ -133,59 +152,61 @@ public class PhysicsSimulation {
                 }
             }
 
-            // 3. 预测下一帧位置
+            // 4. 积分位置
             float3 nextPos = pos + vel * dt;
             
-            // 4. 地形碰撞检测 (Voxel Collision)
-            
-            // A. 地面检测 (Ground)
+            // 5. 碰撞检测
+            // Check Ground/Wall collision
             if (is_solid(nextPos, voxels, voxOX, voxOY, voxOZ, voxSize)) {
-                // 尝试“爬升/自动跳跃” (Auto-Step)
+
+                // A. Auto-Step (Stairs/Slabs)
+                // Check if we can step up 1.1 blocks
                 float3 stepPos = nextPos + (float3)(0, 1.1f, 0);
-                if (!is_solid(stepPos, voxels, voxOX, voxOY, voxOZ, voxSize)) {
-                    // Step up
+
+                // Special Rule: If the block we hit is a FENCE (VOXEL_FENCE),
+                // we treat it as 2 blocks high, so auto-step fails.
+                char hitVoxel = get_voxel(nextPos, voxels, voxOX, voxOY, voxOZ, voxSize);
+                bool isFence = (hitVoxel == VOXEL_FENCE);
+
+                if (!isFence && !is_solid(stepPos, voxels, voxOX, voxOY, voxOZ, voxSize)) {
+                    // Success Step Up
                     if (vel.y < 0) vel.y = 0;
-                    nextPos.y += 0.1f; // 挤上去
-                    pos.y += 0.1f;
+                    nextPos.y += 0.1f; // Bias up
+                    pos.y += 0.1f;     // Bias source
                 } else {
-                    // 真的撞墙了 -> 简单的滑行处理 (Project Velocity)
+                    // B. Collision Response (Slide)
                     float3 testX = (float3)(nextPos.x, pos.y, pos.z);
                     float3 testY = (float3)(pos.x, nextPos.y, pos.z);
                     float3 testZ = (float3)(pos.x, pos.y, nextPos.z);
                     
-                    bool hitX = is_solid(testX, voxels, voxOX, voxOY, voxOZ, voxSize);
                     bool hitY = is_solid(testY, voxels, voxOX, voxOY, voxOZ, voxSize);
+                    bool hitX = is_solid(testX, voxels, voxOX, voxOY, voxOZ, voxSize);
                     bool hitZ = is_solid(testZ, voxels, voxOX, voxOY, voxOZ, voxSize);
                     
                     if (hitY) {
-                        // 撞地/撞天花板
-                        vel.y = -vel.y * elast * 0.2f; // 强衰减，防止弹跳
+                        // Ground Hit
+                        vel.y = -vel.y * elast * 0.1f; // Kill bounce
+                        nextPos.y = pos.y;
 
-                        // 地面强摩擦 (解决滑行问题)
+                        // Ground Friction
                         if (fabs(vel.y) < 0.1f) {
-                             vel.x *= 0.6f; // 0.6 的保留率 = 强摩擦
+                             vel.x *= 0.6f;
                              vel.z *= 0.6f;
-                             // 速度吸附：如果非常慢，直接归零
                              if (fabs(vel.x) < 0.05f) vel.x = 0;
                              if (fabs(vel.z) < 0.05f) vel.z = 0;
-                             if (fabs(vel.y) < 0.05f) vel.y = 0;
                         }
-                        nextPos.y = pos.y; // 重置 Y
                     }
                     if (hitX) {
-                        vel.x = -vel.x * elast;
+                        vel.x = -vel.x * 0.5f;
                         nextPos.x = pos.x;
-                        vel.x *= 0.5f;
                     }
                     if (hitZ) {
-                        vel.z = -vel.z * elast;
+                        vel.z = -vel.z * 0.5f;
                         nextPos.z = pos.z;
-                        vel.z *= 0.5f;
                     }
                 }
             }
             
-            // 5. 最终积分
             pos = nextPos;
             
             // 防止 NaN

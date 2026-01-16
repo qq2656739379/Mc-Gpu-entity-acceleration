@@ -42,6 +42,11 @@ public class SwarmAISystem {
     private cl_kernel swarmKernel;
     private cl_kernel diffuseKernel;
     private cl_kernel injectKernel;
+
+    // Flow Field Kernels
+    private cl_kernel resetCostKernel;
+    private cl_kernel spreadCostKernel;
+    private cl_kernel genVectorKernel;
     
     private List<Entity> pendingEntities = null;
     private int pendingEntityCount = 0;
@@ -51,6 +56,9 @@ public class SwarmAISystem {
     // 冷却计时器：限制 BeeSensor 的昂贵扫描频率
     private int sensorCooldown = 0;
     
+    // Pathfinding Throttle
+    private int pathfindingCooldown = 0;
+
     // Ping-Pong
     private boolean usePingForRead = true;
 
@@ -66,6 +74,13 @@ public class SwarmAISystem {
             swarmKernel = gpuManager.compileKernel(source, "calculateSwarmBehavior");
             diffuseKernel = gpuManager.compileKernel(source, "diffuse_pheromones");
             injectKernel = gpuManager.compileKernel(source, "inject_stimuli");
+
+            // Flow Field Kernels (Included in source now)
+            String flowSrc = FlowFieldKernelSource.getSource();
+            resetCostKernel = gpuManager.compileKernel(flowSrc, "k_resetCostField");
+            spreadCostKernel = gpuManager.compileKernel(flowSrc, "k_spreadCostField");
+            genVectorKernel = gpuManager.compileKernel(flowSrc, "k_generateVectorField");
+
             LOGGER.info("Swarm AI Kernels compiled successfully.");
         } catch (Exception e) {
             LOGGER.error("Failed to compile Swarm AI Kernel", e);
@@ -91,11 +106,12 @@ public class SwarmAISystem {
         List<Entity> nearEntities = new ArrayList<>();
         List<Integer> nearTypes = new ArrayList<>();
         List<Entity> farEntities = new ArrayList<>();
-        List<Integer> farTypes = new ArrayList<>(); // kept for completeness, though likely unused
+        List<Integer> farTypes = new ArrayList<>();
 
         // Get player chunk positions
         Set<Long> activeChunks = new HashSet<>();
-        for (Player player : level.players()) {
+        List<net.minecraft.server.level.ServerPlayer> players = level.players();
+        for (Player player : players) {
             int pX = player.blockPosition().getX() >> 4;
             int pZ = player.blockPosition().getZ() >> 4;
             for (int x = -1; x <= 1; x++) {
@@ -131,8 +147,67 @@ public class SwarmAISystem {
             return;
         }
 
-        // 4. Dispatch Near Entities
+        // 4. Update Flow Fields (Low Frequency)
+        updateFlowFields(level, nearEntities);
+
+        // 5. Dispatch Near Entities
         dispatchToGPU(level, nearEntities, nearTypes);
+    }
+
+    private void updateFlowFields(ServerLevel level, List<Entity> entities) {
+        if (pathfindingCooldown-- > 0) return;
+        pathfindingCooldown = 20; // 1 second update rate
+
+        // Collect Targets
+        List<Integer> playerTargets = new ArrayList<>();
+        List<Integer> livestockTargets = new ArrayList<>();
+        List<Integer> foodTargets = new ArrayList<>();
+
+        int ox = VoxelManager.getOriginX();
+        int oy = VoxelManager.getOriginY();
+        int oz = VoxelManager.getOriginZ();
+        int size = VoxelManager.VOXEL_SIZE;
+
+        // Player Targets
+        for (Player p : level.players()) {
+            BlockPos pos = p.blockPosition();
+            int x = pos.getX() - ox;
+            int y = pos.getY() - oy;
+            int z = pos.getZ() - oz;
+            if (x>=0 && x<size && y>=0 && y<size && z>=0 && z<size) {
+                playerTargets.add(x); playerTargets.add(y); playerTargets.add(z);
+            }
+        }
+
+        // Livestock Targets (Cows, Pigs, etc)
+        // We scan 'entities' list because it contains near entities.
+        for (Entity e : entities) {
+            String id = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
+            boolean isLivestock = id.contains("cow") || id.contains("sheep") || id.contains("pig") || id.contains("chicken");
+            if (isLivestock) {
+                 BlockPos pos = e.blockPosition();
+                 int x = pos.getX() - ox;
+                 int y = pos.getY() - oy;
+                 int z = pos.getZ() - oz;
+                 if (x>=0 && x<size && y>=0 && y<size && z>=0 && z<size) {
+                    livestockTargets.add(x); livestockTargets.add(y); livestockTargets.add(z);
+                 }
+            }
+        }
+
+        // Food Targets (Water, Grass) - Simplified: Just Water for now
+        // A real implementation would scan the VoxelMap for 'Food' blocks, but that's expensive.
+        // For now, let's skip food field or assume Water bodies are targets for thirsty animals.
+        // Or we inject "Water" manually if we knew where it was.
+        // Let's leave Food empty for now to save performance, or use Player as dummy.
+
+        // Execute Updates
+        if (!playerTargets.isEmpty()) {
+             gpuManager.updateFlowField(GPUManager.FIELD_PLAYER, playerTargets, resetCostKernel, spreadCostKernel, genVectorKernel);
+        }
+        if (!livestockTargets.isEmpty()) {
+             gpuManager.updateFlowField(GPUManager.FIELD_LIVESTOCK, livestockTargets, resetCostKernel, spreadCostKernel, genVectorKernel);
+        }
     }
 
     private void dispatchToGPU(ServerLevel level, List<Entity> filteredEntities, List<Integer> entityTypes) {
@@ -141,12 +216,11 @@ public class SwarmAISystem {
             boolean hasFlyers = false;
             for(int t : entityTypes) if(t == TYPE_FLYER || t == TYPE_QUEEN) { hasFlyers = true; break; }
             if (hasFlyers) {
-                // 优化：每 40 Tick 执行一次扫描（约 2 秒），显著降低 CPU 占用
                 if (sensorCooldown-- <= 0) {
                     sensorCooldown = 40;
                     BlockPos center = filteredEntities.get(0).blockPosition();
                     BeeSensor.scan(level, center);
-                    gpuManager.writeAttrFromSensor(); // 只有扫描更新了，才上传数据
+                    gpuManager.writeAttrFromSensor();
                 }
             }
 
@@ -164,18 +238,15 @@ public class SwarmAISystem {
                 VoxelManager.clearDirty();
             }
             
-            // 🚀 扩散与注入
             if (diffuseKernel != null) {
                 cl_mem inputMap = usePingForRead ? gpuManager.getPheromoneMemA() : gpuManager.getPheromoneMemB();
                 cl_mem outputMap = usePingForRead ? gpuManager.getPheromoneMemB() : gpuManager.getPheromoneMemA();
                 
-                // 1. Inject Stimuli into the INPUT map before diffusion
                 if (injectKernel != null) {
                     BlockPos center = filteredEntities.get(0).blockPosition();
                     StimulusManager.scanAndInject(level, center, gpuManager, injectKernel, inputMap);
                 }
 
-                // 2. Diffuse Input -> Output
                 int argIdx = 0;
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_mem, Pointer.to(inputMap));
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_mem, Pointer.to(outputMap));
@@ -256,15 +327,11 @@ public class SwarmAISystem {
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float, Pointer.to(new float[]{worldTime}));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_int, Pointer.to(new int[]{isRaining}));
 
-        // --- Weather Injection (Wind & Rain) ---
         float[] wind = new float[]{0f, 0f, 0f};
         float rainIntensity = level.getRainLevel(1.0f);
         if (level.isThundering()) rainIntensity = 1.0f;
-
-        // Try get TFC Wind if available (Reflection or Registry check needed if dependent)
-        // For now, simple Vanilla Wind approximation:
         if (rainIntensity > 0) {
-            wind[0] = 0.05f * rainIntensity; // Slight wind
+            wind[0] = 0.05f * rainIntensity;
             wind[2] = 0.05f * rainIntensity;
         }
 
@@ -272,6 +339,11 @@ public class SwarmAISystem {
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float, Pointer.to(new float[]{rainIntensity}));
 
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(buffers.paramsMem()));
+
+        // --- Pass Flow Field Buffers ---
+        clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getVectorFieldMem(GPUManager.FIELD_PLAYER)));
+        clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getVectorFieldMem(GPUManager.FIELD_LIVESTOCK)));
+        clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getVectorFieldMem(GPUManager.FIELD_FOOD)));
     }
 
     private void applyPendingResults(ServerLevel level) {
@@ -307,19 +379,13 @@ public class SwarmAISystem {
 
                 double hSpeedSq = vx * vx + vz * vz;
                 if (hSpeedSq > 0.004) { 
-                    // Calculate Target Yaw based on velocity
                     float targetYaw = (float) (Math.atan2(vz, vx) * (180.0D / Math.PI)) - 90.0F;
 
-                    // --- Handle Goat Moonwalking ---
                     String eid = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(entity.getType()).toString();
                     boolean isGoat = (entity instanceof net.minecraft.world.entity.animal.goat.Goat) || eid.contains("goat");
                     if (isGoat) {
-                        targetYaw += 180.0f; // Face opposite to movement
+                        targetYaw += 180.0f;
                     }
-
-                    // --- Fix Horse Moonwalking Bug ---
-                    // Explicitly ensure horses face forward.
-                    // (This code block runs for everyone, but we guard it to be sure)
 
                     float smoothYaw = rotLerp(entity.getYRot(), targetYaw, 0.2f);
                     entity.setYRot(smoothYaw);
@@ -356,12 +422,20 @@ public class SwarmAISystem {
         for (Entity e : input) {
             if (e instanceof Player) continue;
             if (e instanceof AbstractVillager) continue;
+
+            // Check for Birds / Parrots
+            boolean isBird = e.getType().getDescriptionId().contains("parrot") ||
+                             e.getType().getDescriptionId().contains("bird") ||
+                             e.getType().getDescriptionId().contains("eagle") ||
+                             e.getType().getDescriptionId().contains("owl");
+
             if (e instanceof ItemEntity) { output.add(e); types.add(TYPE_ITEM); } 
             else if (e instanceof ExperienceOrb) { output.add(e); types.add(TYPE_XP); } 
             else if (e instanceof Animal || e instanceof net.minecraft.world.entity.ambient.AmbientCreature || e instanceof WaterAnimal || e instanceof Mob) {
                 output.add(e);
                 if (e instanceof WaterAnimal || e instanceof net.minecraft.world.entity.animal.Squid) types.add(TYPE_SWIMMER);
-                else if (e instanceof FlyingAnimal || e instanceof Bee || e instanceof Bat) {
+                else if (e instanceof FlyingAnimal || e instanceof Bee || e instanceof Bat || isBird) {
+                    // Reuse Bee Logic for Birds
                     if (e instanceof Bee && (e.getTags().contains("queen") || (e.hasCustomName() && e.getCustomName().getString().contains("Queen")))) types.add(TYPE_QUEEN);
                     else types.add(TYPE_FLYER);
                 } else types.add(TYPE_WALKER);
@@ -414,7 +488,14 @@ public class SwarmAISystem {
         while (diff >= 180.0F) diff -= 360.0F;
         return start + diff * factor;
     }
-    public void cleanup() { if (swarmKernel != null) clReleaseKernel(swarmKernel); if (diffuseKernel != null) clReleaseKernel(diffuseKernel); }
+    public void cleanup() {
+        if (swarmKernel != null) clReleaseKernel(swarmKernel);
+        if (diffuseKernel != null) clReleaseKernel(diffuseKernel);
+        if (injectKernel != null) clReleaseKernel(injectKernel);
+        if (resetCostKernel != null) clReleaseKernel(resetCostKernel);
+        if (spreadCostKernel != null) clReleaseKernel(spreadCostKernel);
+        if (genVectorKernel != null) clReleaseKernel(genVectorKernel);
+    }
     public void cleanupStragglers(ServerLevel level) {
         try {
             for (Entity ent : level.getAllEntities()) {

@@ -72,6 +72,20 @@ public class GPUManager {
     private cl_mem pheromoneMemA;
     private cl_mem pheromoneMemB;
     
+    // Flow Field Buffers (Cost Field & Vector Field)
+    // We maintain 3 sets of Flow Fields: Player, Livestock, Food
+    // Cost Field uses 'ushort' (16-bit), Vector Field uses 'float4'
+    public static final int FIELD_PLAYER = 0;
+    public static final int FIELD_LIVESTOCK = 1;
+    public static final int FIELD_FOOD = 2;
+    public static final int FIELD_COUNT = 3;
+
+    private cl_mem[] costFieldMems = new cl_mem[FIELD_COUNT];
+    private cl_mem[] vectorFieldMems = new cl_mem[FIELD_COUNT];
+    private IntBuffer targetPosBuffer; // Reusable buffer for uploading targets
+    private cl_mem targetPosMem;
+    private int targetPosCapacity = 0;
+
     // Voxels
     private cl_mem voxelMem;
     
@@ -139,9 +153,6 @@ public class GPUManager {
         globalMemorySize = val[0];
 
         // Init Buffers (Expanded for Multi-Channel)
-        // PHERO_VOLUME is per channel. Total size is VOLUME * CHANNELS
-        // Note: Java int is 2GB max for array index, but clCreateBuffer takes 'long' for size.
-        // 512*512*128 * 8 * 4 bytes = 1 GB. Safe.
         long pheroBytes = (long)VoxelManager.PHERO_VOLUME * VoxelManager.PHERO_CHANNELS * Sizeof.cl_float;
 
         pheromoneMemA = clCreateBuffer(context, CL_MEM_READ_WRITE, pheroBytes, null, null);
@@ -153,6 +164,15 @@ public class GPUManager {
 
         voxelMem = clCreateBuffer(context, CL_MEM_READ_ONLY, VoxelManager.VOXEL_VOLUME, null, null);
         
+        // Init Flow Fields
+        long costBytes = (long)VoxelManager.VOXEL_VOLUME * Sizeof.cl_ushort;
+        long vecBytes = (long)VoxelManager.VOXEL_VOLUME * 4 * Sizeof.cl_float; // float4
+
+        for(int i=0; i<FIELD_COUNT; i++) {
+            costFieldMems[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, costBytes, null, null);
+            vectorFieldMems[i] = clCreateBuffer(context, CL_MEM_READ_WRITE, vecBytes, null, null);
+        }
+
         gpuAvailable = true;
         LOGGER.info("OpenCL 初始化成功: {}", deviceName);
     }
@@ -301,7 +321,16 @@ public class GPUManager {
 
     public cl_kernel compileKernel(String source, String name) {
         cl_program prog = clCreateProgramWithSource(context, 1, new String[]{source}, null, null);
-        clBuildProgram(prog, 0, null, null, null, null);
+        int err = clBuildProgram(prog, 0, null, null, null, null);
+        if (err != CL_SUCCESS) {
+             long[] logSize = new long[1];
+             clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, 0, null, logSize);
+             byte[] logData = new byte[(int)logSize[0]];
+             clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, logSize[0], Pointer.to(logData), null);
+             String buildLog = new String(logData, 0, logData.length - 1);
+             LOGGER.error("OpenCL Build Error for {}:\n{}", name, buildLog);
+             throw new RuntimeException("OpenCL compilation failed: " + name);
+        }
         return clCreateKernel(prog, name, null);
     }
 
@@ -311,6 +340,64 @@ public class GPUManager {
         if (data != null) clEnqueueWriteBuffer(commandQueue, voxelMem, CL_TRUE, 0, (long)data.capacity(), Pointer.to(data), 0, null, null);
     }
     
+    // --- Flow Field Management ---
+    public void updateFlowField(int fieldID, List<Integer> targets, cl_kernel resetK, cl_kernel spreadK, cl_kernel genK) {
+        if (!gpuAvailable || fieldID < 0 || fieldID >= FIELD_COUNT) return;
+
+        int targetCount = targets.size() / 3;
+        if (targetCount == 0) return; // No targets, maybe skip
+
+        // 1. Upload Targets
+        ensureTargetBuffer(targetCount);
+        targetPosBuffer.clear();
+        for(int i : targets) targetPosBuffer.put(i);
+        targetPosBuffer.flip();
+        clEnqueueWriteBuffer(commandQueue, targetPosMem, CL_TRUE, 0, (long)targetCount * 3 * 4, Pointer.to(targetPosBuffer), 0, null, null);
+
+        cl_mem costMem = costFieldMems[fieldID];
+        cl_mem vecMem = vectorFieldMems[fieldID];
+
+        // 2. Reset Cost Field
+        clSetKernelArg(resetK, 0, Sizeof.cl_mem, Pointer.to(costMem));
+        clSetKernelArg(resetK, 1, Sizeof.cl_mem, Pointer.to(targetPosMem));
+        clSetKernelArg(resetK, 2, Sizeof.cl_int, Pointer.to(new int[]{targetCount}));
+
+        long[] global = new long[]{VoxelManager.VOXEL_VOLUME};
+        clEnqueueNDRangeKernel(commandQueue, resetK, 1, null, global, null, 0, null, null);
+
+        // 3. Flood Fill (Multiple Passes)
+        // 64 passes allows reaching 64 blocks away.
+        clSetKernelArg(spreadK, 0, Sizeof.cl_mem, Pointer.to(costMem));
+        clSetKernelArg(spreadK, 1, Sizeof.cl_mem, Pointer.to(voxelMem));
+
+        for(int i=0; i<64; i++) {
+             clEnqueueNDRangeKernel(commandQueue, spreadK, 1, null, global, null, 0, null, null);
+        }
+
+        // 4. Generate Vectors
+        clSetKernelArg(genK, 0, Sizeof.cl_mem, Pointer.to(costMem));
+        clSetKernelArg(genK, 1, Sizeof.cl_mem, Pointer.to(vecMem));
+        clEnqueueNDRangeKernel(commandQueue, genK, 1, null, global, null, 0, null, null);
+
+        clFlush(commandQueue);
+    }
+
+    private void ensureTargetBuffer(int count) {
+        if (count > targetPosCapacity) {
+             if (targetPosMem != null) clReleaseMemObject(targetPosMem);
+             if (targetPosBuffer != null) MemoryUtil.memFree(targetPosBuffer);
+
+             targetPosCapacity = count + 256;
+             targetPosBuffer = MemoryUtil.memAllocInt(targetPosCapacity * 3);
+             targetPosMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)targetPosCapacity * 3 * 4, null, null);
+        }
+    }
+
+    public cl_mem getVectorFieldMem(int id) {
+        if(id < 0 || id >= FIELD_COUNT) return null;
+        return vectorFieldMems[id];
+    }
+
     // --- 🚀 兼容层：恢复旧方法以修复编译错误 ---
     
     public void writeBufferAsync(cl_mem mem, long size, FloatBuffer buffer) {
@@ -452,6 +539,14 @@ public class GPUManager {
         if (attrZMem != null) clReleaseMemObject(attrZMem);
         if (attrTypeMem != null) clReleaseMemObject(attrTypeMem);
         if (beeStatesMem != null) clReleaseMemObject(beeStatesMem);
+
+        // Cleanup Flow Fields
+        for(int i=0; i<FIELD_COUNT; i++) {
+            if(costFieldMems[i] != null) clReleaseMemObject(costFieldMems[i]);
+            if(vectorFieldMems[i] != null) clReleaseMemObject(vectorFieldMems[i]);
+        }
+        if(targetPosMem != null) clReleaseMemObject(targetPosMem);
+        if(targetPosBuffer != null) MemoryUtil.memFree(targetPosBuffer);
 
         // Cleanup Direct Buffers and cl_mems for stimuli
         for (int i = 0; i < SWAP_SLOTS; i++) {

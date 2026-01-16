@@ -7,6 +7,15 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.block.FenceBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
+import net.minecraft.world.level.block.WallBlock;
+import net.minecraft.world.level.block.FireBlock;
+import net.minecraft.world.level.block.MagmaBlock;
+import net.minecraft.world.level.block.CampfireBlock;
+import net.minecraft.world.level.block.SweetBerryBushBlock;
+import net.minecraft.world.level.block.WitherRoseBlock;
+import net.minecraft.world.level.block.CactusBlock;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.lwjgl.system.MemoryUtil;
 
@@ -28,6 +37,13 @@ public class VoxelManager {
     
     public static final int VOXEL_SIZE = 128; 
     public static final int VOXEL_VOLUME = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
+
+    // Voxel IDs
+    public static final byte VOXEL_AIR = 0;
+    public static final byte VOXEL_SOLID = 1;
+    public static final byte VOXEL_WATER = 2;
+    public static final byte VOXEL_FENCE = 3;
+    public static final byte VOXEL_DANGER = 4;
 
     private static ByteBuffer voxelBuffer;
     private static final AtomicBoolean isDirty = new AtomicBoolean(true);
@@ -117,23 +133,20 @@ public class VoxelManager {
                 for(int z=0; z<16; z++) for(int x=0; x<16; x++) {
                     pos.set(bx + x, baseBlockY - 1, bz + z);
                     BlockState bs = belowSection.getBlockState(x, 15, z);
-                    VoxelShape shape = bs.getCollisionShape(level, pos);
-                    colIsTall[z*16+x] = !shape.isEmpty() && shape.max(Direction.Axis.Y) > 1.0;
+                    colIsTall[z*16+x] = isTallBlock(bs);
                 }
             } else if (i == 0) {
                  // 底部 Section，回退到普通查询
                  for(int z=0; z<16; z++) for(int x=0; x<16; x++) {
                     pos.set(bx + x, baseBlockY - 1, bz + z);
                     BlockState bs = chunk.getBlockState(pos);
-                    VoxelShape shape = bs.getCollisionShape(level, pos);
-                    colIsTall[z*16+x] = !shape.isEmpty() && shape.max(Direction.Axis.Y) > 1.0;
+                    colIsTall[z*16+x] = isTallBlock(bs);
                  }
             }
 
             for (int y = 0; y < 16; y++) {
                 int worldY = baseBlockY + y;
-                if (worldY < originY || worldY >= originY + VOXEL_SIZE) continue; // 超出范围不写入，但需继续循环以维护状态?
-                // 实际上我们不需要维护 colIsTall 跨越超出部分，因为超出部分不会被写入。
+                if (worldY < originY || worldY >= originY + VOXEL_SIZE) continue;
                 
                 int ly = worldY - originY;
 
@@ -150,28 +163,39 @@ public class VoxelManager {
                         pos.set(worldX, worldY, worldZ);
                         BlockState state = section.getBlockState(x, y, z);
                         
-                        byte val = 0;
+                        byte val = VOXEL_AIR;
                         boolean currentIsTall = false;
 
                         if (!state.isAir()) { 
-                            VoxelShape shape = state.getCollisionShape(level, pos);
-                            if (!shape.isEmpty()) {
-                                // 基础固体
-                                val = 1; 
-                                // 检查是否为高方块 (栅栏/围墙高度 > 1.0)
-                                if (shape.max(Direction.Axis.Y) > 1.0) {
-                                    currentIsTall = true;
-                                }
+                            if (state.getBlock() instanceof FireBlock ||
+                                state.getBlock() instanceof MagmaBlock ||
+                                state.getBlock() instanceof CampfireBlock ||
+                                state.getBlock() instanceof SweetBerryBushBlock ||
+                                state.getBlock() instanceof WitherRoseBlock ||
+                                state.getBlock() instanceof CactusBlock) {
+                                val = VOXEL_DANGER;
                             } else {
-                                FluidState fluid = state.getFluidState();
-                                if (!fluid.isEmpty()) val = 2; // 液体
+                                VoxelShape shape = state.getCollisionShape(level, pos);
+                                if (!shape.isEmpty()) {
+                                    // 基础固体
+                                    val = VOXEL_SOLID;
+
+                                    // 检查是否为高方块 (栅栏/围墙)
+                                    if (isTallBlock(state)) {
+                                        val = VOXEL_FENCE;
+                                        currentIsTall = true;
+                                    }
+                                } else {
+                                    FluidState fluid = state.getFluidState();
+                                    if (!fluid.isEmpty()) val = VOXEL_WATER; // 液体
+                                }
                             }
                         }
 
                         // 🚀 核心修复：如果当前方块下方是高方块（栅栏），则当前位置视为固体（虚拟墙）
                         // 这样 GPU 就认为这是 2 格高的墙，不会尝试跳过去
                         if (colIsTall[z * 16 + x]) {
-                            val = 1;
+                            val = VOXEL_SOLID; // 标记为实体，防止跳跃
                         }
 
                         // 更新状态供下一层 (y+1) 使用
@@ -185,6 +209,12 @@ public class VoxelManager {
         }
     }
     
+    private static boolean isTallBlock(BlockState state) {
+        return state.getBlock() instanceof FenceBlock ||
+               state.getBlock() instanceof WallBlock ||
+               state.getBlock() instanceof FenceGateBlock;
+    }
+
     public static void clear() {
         if (voxelBuffer != null) {
              try { MemoryUtil.memSet(voxelBuffer, 0); } 

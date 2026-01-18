@@ -86,39 +86,40 @@ sudo apt install intel-opencl-icd
 **公式：**
 对于每个实体 $i$，其加速度 $\vec{a}_i$ 为：
 
-$$ \vec{a}_i = \frac{W_s \vec{F}_{sep} + W_a \vec{F}_{align} + W_c \vec{F}_{coh} + W_t \vec{F}_{target}}{m} $$
+$$ \vec{a}_i = \frac{W_s \vec{F}_{\text{sep}} + W_a \vec{F}_{\text{align}} + W_c \vec{F}_{\text{coh}} + W_t \vec{F}_{\text{target}}}{m} $$
 
 其中：
-- **分离 (Separation) $\vec{F}_{sep}$**: 避免拥挤。
-  $$ \vec{F}_{sep} = \sum_{j \in neighbors} \frac{\vec{p}_i - \vec{p}_j}{||\vec{p}_i - \vec{p}_j||^2} $$
-- **对齐 (Alignment) $\vec{F}_{align}$**: 与邻居同向飞行。
-  $$ \vec{F}_{align} = \left( \frac{1}{N} \sum_{j} \vec{v}_j \right) - \vec{v}_i $$
-- **凝聚 (Cohesion) $\vec{F}_{coh}$**: 向邻居中心靠拢。
-  $$ \vec{F}_{coh} = \left( \frac{1}{N} \sum_{j} \vec{p}_j \right) - \vec{p}_i $$
+- **分离 (Separation) $\vec{F}_{\text{sep}}$**: 避免拥挤。
+  $$ \vec{F}_{\text{sep}} = \sum_{j \in \text{neighbors}} \frac{\vec{p}_i - \vec{p}_j}{||\vec{p}_i - \vec{p}_j||^2} $$
+- **对齐 (Alignment) $\vec{F}_{\text{align}}$**: 与邻居同向飞行。
+  $$ \vec{F}_{\text{align}} = \left( \frac{1}{N} \sum_{j} \vec{v}_j \right) - \vec{v}_i $$
+- **凝聚 (Cohesion) $\vec{F}_{\text{coh}}$**: 向邻居中心靠拢。
+  $$ \vec{F}_{\text{coh}} = \left( \frac{1}{N} \sum_{j} \vec{p}_j \right) - \vec{p}_i $$
 
 ### 2. 费洛蒙扩散 (Reaction-Diffusion)
 我们使用 8 通道的 3D 网格来模拟气味（如食物、捕食者、同类）。气味在空间中通过拉普拉斯卷积进行扩散。
 
 **公式 (离散化)：**
-$$ C_{new}(x) = C_{old}(x) + \left( \bar{C}_{neighbors} - C_{old}(x) \right) \times R_{diff} \times \Delta t $$
+$$ C_{\text{new}}(x) = C_{\text{old}}(x) + \left( \bar{C}_{\text{neighbors}} - C_{\text{old}}(x) \right) \times R_{\text{diff}} \times \Delta t $$
 
 其中：
 - $C(x)$ 是体素 $x$ 处的费洛蒙浓度。
-- $\bar{C}_{neighbors}$ 是 6-邻域的平均浓度。
-- $R_{diff}$ 是扩散率 (Diffusion Rate)。
+- $\bar{C}_{\text{neighbors}}$ 是 6-邻域的平均浓度。
+- $R_{\text{diff}}$ 是扩散率 (Diffusion Rate)。
 
 ### 3. 流场寻路 (Flow Field Pathfinding)
 为了支持地面单位的高效寻路，我们使用波前传播 (Wavefront Propagation) 生成流场。
 
 1.  **生成代价场 (Cost Field):** 从目标点开始进行广度优先搜索 (BFS)。
-    $$ Cost(n) = \min_{m \in neighbors} (Cost(m)) + StepCost(n) $$
-2.  **生成向量场 (Vector Field):** 计算代价场的梯度下降方向。
-    $$ \vec{V}(x) = - \nabla Cost(x) $$
+    $$ \text{Cost}(n) = \min_{m \in \text{neighbors}} (\text{Cost}(m)) + \text{StepCost}(n) $$
+2.  **生成向量场 (Vector Field):** 在每个网格点，选择代价最小的邻居方向（离散梯度的最速下降法）。
+    $$ \vec{V}(x) = \text{normalize}\left( \vec{p}_{\text{min\_neighbor}} - \vec{p}_{x} \right) $$
+    *其中 $\text{min\_neighbor}$ 是 6-邻域中 $\text{Cost}$ 最小的节点。*
 
 ### 4. 物理积分 (Physics Integration)
 使用半隐式欧拉法 (Semi-implicit Euler) 保证稳定性。
 
-$$ \vec{v}_{t+1} = \vec{v}_t + (\vec{g} + \frac{\vec{F}_{drag}}{m}) \cdot \Delta t $$
+$$ \vec{v}_{t+1} = \vec{v}_t + (\vec{g} + \frac{\vec{F}_{\text{drag}}}{m}) \cdot \Delta t $$
 $$ \vec{p}_{t+1} = \vec{p}_t + \vec{v}_{t+1} \cdot \Delta t $$
 
 ---

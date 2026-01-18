@@ -3,167 +3,217 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Forge](https://img.shields.io/badge/Forge-1.20.1-orange.svg)](https://files.minecraftforge.net/)
 
-一个专为 Minecraft Forge 1.20.1 设计的高性能服务端 Mod。它利用 OpenCL 技术，将繁重的生物 AI 和物理计算卸载到 GPU 上并行处理，从而在不降低服务器 TPS 的情况下支持更大规模的生物数量。
+本模组利用 OpenCL 技术将 Minecraft 实体的 AI 决策与物理计算卸载到 GPU 上并行处理。通过大规模并行计算，我们能在保持高 TPS 的同时支持数千个实体，并引入了基于费洛蒙的群体智能和流场寻路算法。
 
-## ✨ 核心功能
+---
 
-### 🚀 GPU 并行加速 (OpenCL)
-- **高性能计算**：利用显卡的并行处理能力，处理数千个实体的行为逻辑。
-- **智能回退**：自动检测 OpenCL 环境，若 GPU 不可用则平滑切换回 CPU 计算，确保稳定性。
+## 📚 目录
 
-### 🧠 群体智能系统 (Swarm AI)
-- **Boids 算法实现**：完美复刻经典的鸟群/鱼群行为（分离、对齐、聚合）。
-- **优化飞行生物**：专为蝙蝠、蜜蜂等飞行生物设计，模拟自然的群聚飞舞效果。
-- **高效处理**：在 GPU 上同时计算数千个实体的相互作用力，几乎不占用主线程时间。
+1. [驱动安装指南 (Linux)](#-驱动安装指南-linux)
+2. [算法原理与数学公式](#-算法原理与数学公式)
+3. [如何修改生物算法 (配置)](#-如何修改生物算法-配置)
+4. [支持的生物列表](#-支持的生物列表)
+5. [兼容性说明](#-兼容性说明)
+6. [安装与构建](#-安装与构建)
 
-### 🗺️ 体素地形感知 (Voxel System)
-- **智能避障**：基于体素化地图的快速碰撞检测，实体能感知地形并自动规避。
-- **栅栏识别**：通过“高方块”识别逻辑，防止生物错误地跳过栅栏或围墙。
-- **零卡顿更新**：采用分时切片扫描技术 (Incremental Update)，地形数据更新对服务器性能影响微乎其微。
+---
 
-### 🌍 动态气候系统 (Climate System)
-- **GPU 温度平滑**：利用 GPU 异步计算区块温度分布，实现更自然的热量扩散模拟（可用于生存模组扩展）。
+## 📥 驱动安装指南 (Linux)
 
-### ⚛️ 物理模拟引擎
-- **实体物理**：接管实体的重力、空气阻力、地面摩擦计算。
-- **碰撞响应**：基于 GPU 的快速碰撞反馈，支持自定义实体弹力系数。
+本模组依赖 OpenCL 1.2+。在 Linux 服务器（如 Ubuntu/Debian）上，您需要安装对应的 OpenCL 运行时 (ICD)。
 
-## 💻 系统要求
+### 1. 检测当前状态
+首先安装 `clinfo` 工具来检查系统是否已正确识别 OpenCL 设备：
+```bash
+sudo apt update
+sudo apt install clinfo
+clinfo
+```
+如果输出显示 `Number of platforms: 0`，请按照下方对应厂商安装驱动。
 
-| 组件 | 最低要求 | 推荐配置 |
-|------|----------|----------|
-| **Minecraft** | 1.20.1 | 1.20.1 |
-| **Forge** | 47.4.0+ | 最新稳定版 |
-| **Java** | Java 17 | Java 17 |
-| **GPU** | 支持 OpenCL 1.2 的显卡 | NVIDIA GTX 1060 / AMD RX 580 或更高 |
-| **驱动** | 最新显卡驱动 | 包含 OpenCL 支持的驱动 |
+### 2. NVIDIA 显卡
+对于 NVIDIA 显卡，OpenCL 包含在专有驱动中。
 
-> **注意**：本模组为服务端 Mod，客户端无需安装即可进入服务器。
+```bash
+# 添加显卡驱动 PPA (可选，推荐 Ubuntu 用户)
+sudo add-apt-repository ppa:graphics-drivers/ppa
+sudo apt update
 
-## 📥 安装指南
+# 安装驱动 (以 535 版本为例，请根据显卡型号选择)
+sudo apt install nvidia-driver-535
 
-1. **环境准备**：
-   - 确保服务器已安装 **Forge 1.20.1**。
-   - 确保服务器显卡驱动已更新，并支持 OpenCL。
-     - **NVIDIA**: 安装 CUDA Toolkit 或标准驱动。
-     - **AMD**: 安装标准驱动即可。
-     - **Linux 用户**: 可能需要安装 `clinfo` 和对应的 OpenCL 运行时 (如 `nvidia-opencl-icd`).
+# 某些发行版可能需要额外安装 OpenCL ICD 加载器
+sudo apt install ocl-icd-libopencl1
+```
+*安装完成后重启系统。*
 
-2. **安装 Mod**：
-   - 将 Mod JAR 文件放入服务器的 `mods` 文件夹。
-   - 启动服务器。
+### 3. AMD 显卡
+推荐使用开源 Mesa 驱动（支持大多数现代 AMD 卡），或者安装 AMD 官方专有驱动 (AMDGPU-PRO)。
 
-3. **验证安装**：
-   - 查看控制台日志，寻找类似 `[GPU Manager] GPU Device: NVIDIA GeForce RTX 3060` 的信息。
-   - 在游戏内使用 `/gpuaccel info` 命令检查状态。
-
-## ⚙️ 配置详解
-
-本模组配置文件位于 `config/` 目录下（注意：从旧版的 `serverconfig` 移至 `config` 以支持更通用的配置）。
-
-### 1. 全局配置 (`gpuaccel-general.toml`)
-控制 GPU 加速的核心开关和算法选择。
-
-```toml
-[GPU Settings]
-  # 启用 GPU 加速 (必须有支持 OpenCL 的设备)
-  enableGPU = true
-  # 触发 GPU 加速的最小实体数 (少于此数量使用 CPU 以减少开销)
-  minEntitiesForGPU = 10
-
-[Algorithm Selection]
-  # 启用 GPU 群体 AI (Swarm AI)
-  enableSwarmAIGPU = true
-  # 启用 GPU 物理模拟 (默认关闭，按需开启)
-  enablePhysicsGPU = false
-  # 激进模式：处理所有非玩家生物 (包括模组生物)，可能增加负载
-  aggressiveMode = false
-
-[Performance Settings]
-  # 更新间隔 (Tick)。1=每tick更新。
-  # 调高此值可大幅提升性能，但生物反应会变慢。
-  updateInterval = 1
+**方案 A: 开源驱动 (Mesa Clover/Rusticl)**
+适用于大多数场景，安装简单。
+```bash
+sudo apt install mesa-opencl-icd
 ```
 
-### 2. 群体 AI 配置 (`gpuaccel-swarm.toml`)
-调整生物群聚的行为参数。
+**方案 B: 官方专有驱动 (AMDGPU-PRO)**
+前往 [AMD 官网](https://www.amd.com/en/support) 下载对应发行版的安装脚本。
+```bash
+# 解压并进入目录
+tar -Jxvf amdgpu-install-*.tar.xz
+cd amdgpu-install-*
 
-```toml
-[Swarm Settings]
-  # 吸引力：生物向目标点移动的力度
-  "Attraction Force" = 0.05
-  # 悬停频率：飞行生物原地悬停的抖动频率
-  "Hover Frequency" = 2.0
-  # ...其他参数可调整聚集程度和分散度
+# 仅安装 OpenCL 部分 (headless 模式适用于无头服务器)
+./amdgpu-install --usecase=opencl --no-3d
 ```
 
-### 3. 体素系统配置 (`gpuaccel-voxel.toml`)
-调整地形感知的精度和性能。
+### 4. Intel 核显/显卡
+Intel 提供了计算运行时 (Compute Runtime/NEO)。
 
-```toml
-[voxel_system]
-  # 扫描半径 (单位：块)，影响生物能感知的地形范围
-  scanRadius = 32
-  # 地形数据重扫描间隔 (Tick)
-  updateInterval = 20
+```bash
+sudo apt install intel-opencl-icd
 ```
 
-## 🎮 命令使用
+---
 
-需要 OP 权限 (Level 2+)。
+## 🧮 算法原理与数学公式
 
-### 基础命令
-- `/gpuaccel info`
-  - 显示当前 GPU 设备信息、显存使用情况和计算单元数量。
-  - 用于验证 OpenCL 是否正常工作。
+本模组在 GPU 上实现了多套并行算法。以下是核心逻辑的数学表达。
 
-- `/gpuaccel spawn_swarm`
-  - 在玩家周围生成 50 只蝙蝠，用于测试群体 AI 效果。
+### 1. 群体智能 (Swarm / Boids)
+基于 Reynolds 的 Boids 算法，我们计算三个核心力，并加上目标吸引力。
 
-### 高级控制 (需启用 `AlgorithmCommand`)
-*注：以下命令在部分版本中可用，用于实时调试。*
-- `/gpualgo global <true|false>`: 实时切换 GPU 加速总开关。
-- `/gpualgo swarm <true|false>`: 实时切换群体 AI 模块。
-- `/gpualgo status`: 查看当前各模块开启状态。
+**公式：**
+对于每个实体 $i$，其加速度 $\vec{a}_i$ 为：
 
-## 🔧 故障排除
+$$ \vec{a}_i = \frac{W_s \vec{F}_{sep} + W_a \vec{F}_{align} + W_c \vec{F}_{coh} + W_t \vec{F}_{target}}{m} $$
 
-### ❓ 服务器启动时提示 "No OpenCL platforms found"
-- **原因**：系统未安装 OpenCL 驱动，或驱动不完整。
-- **解决**：
-  - Windows: 更新显卡驱动。
-  - Linux: 运行 `clinfo` 检查，安装 `ocl-icd-opencl-dev` 或对应显卡厂商的 OpenCL 包。
+其中：
+- **分离 (Separation) $\vec{F}_{sep}$**: 避免拥挤。
+  $$ \vec{F}_{sep} = \sum_{j \in neighbors} \frac{\vec{p}_i - \vec{p}_j}{||\vec{p}_i - \vec{p}_j||^2} $$
+- **对齐 (Alignment) $\vec{F}_{align}$**: 与邻居同向飞行。
+  $$ \vec{F}_{align} = \left( \frac{1}{N} \sum_{j} \vec{v}_j \right) - \vec{v}_i $$
+- **凝聚 (Cohesion) $\vec{F}_{coh}$**: 向邻居中心靠拢。
+  $$ \vec{F}_{coh} = \left( \frac{1}{N} \sum_{j} \vec{p}_j \right) - \vec{p}_i $$
 
-### ❓ 生物行为卡顿或瞬移
-- **原因**：GPU 负载过高或数据传输延迟。
-- **解决**：
-  - 在 `gpuaccel-general.toml` 中将 `updateInterval` 调大 (例如 2 或 3)。
-  - 增大 `minEntitiesForGPU` 阈值。
+### 2. 费洛蒙扩散 (Reaction-Diffusion)
+我们使用 8 通道的 3D 网格来模拟气味（如食物、捕食者、同类）。气味在空间中通过拉普拉斯卷积进行扩散。
 
-### ❓ "Config conflict detected" 崩溃
-- **原因**：旧版配置文件冲突。
-- **解决**：删除 `config/` 目录下的相关 `.toml` 文件，让 Mod 重新生成。
+**公式 (离散化)：**
+$$ C_{new}(x) = C_{old}(x) + \left( \bar{C}_{neighbors} - C_{old}(x) \right) \times R_{diff} \times \Delta t $$
 
-## 🛠️ 开发者指南
+其中：
+- $C(x)$ 是体素 $x$ 处的费洛蒙浓度。
+- $\bar{C}_{neighbors}$ 是 6-邻域的平均浓度。
+- $R_{diff}$ 是扩散率 (Diffusion Rate)。
+
+### 3. 流场寻路 (Flow Field Pathfinding)
+为了支持地面单位的高效寻路，我们使用波前传播 (Wavefront Propagation) 生成流场。
+
+1.  **生成代价场 (Cost Field):** 从目标点开始进行广度优先搜索 (BFS)。
+    $$ Cost(n) = \min_{m \in neighbors} (Cost(m)) + StepCost(n) $$
+2.  **生成向量场 (Vector Field):** 计算代价场的梯度下降方向。
+    $$ \vec{V}(x) = - \nabla Cost(x) $$
+
+### 4. 物理积分 (Physics Integration)
+使用半隐式欧拉法 (Semi-implicit Euler) 保证稳定性。
+
+$$ \vec{v}_{t+1} = \vec{v}_t + (\vec{g} + \frac{\vec{F}_{drag}}{m}) \cdot \Delta t $$
+$$ \vec{p}_{t+1} = \vec{p}_t + \vec{v}_{t+1} \cdot \Delta t $$
+
+---
+
+## ⚙️ 如何修改生物算法 (配置)
+
+您可以通过修改配置文件来调整算法权重，从而改变生物的行为模式。所有配置位于 `config/` 目录下。
+
+### 修改群体行为 (`gpuaccel-swarm.toml`)
+此文件控制 Boids 算法的各项系数。
+
+| 参数项 | 说明 | 推荐调试方向 |
+|--------|------|--------------|
+| `separationWeight` | 分离力权重 | 调大此值可让生物群更分散，避免重叠。 |
+| `alignmentWeight` | 对齐力权重 | 调大此值可让生物群飞得更整齐（像鸟群）。 |
+| `cohesionWeight` | 凝聚力权重 | 调大此值可让生物紧紧抱团。 |
+| `maxSpeed` | 最大速度 | 限制生物在 GPU 模式下的飞行速度。 |
+| `Attraction Force` | 目标吸引力 | 控制生物飞向目标（如花朵、玩家）的欲望强度。 |
+
+### 修改全局物理与性能 (`gpuaccel-general.toml`)
+
+| 参数项 | 说明 |
+|--------|------|
+| `enablePhysicsGPU` | 开启 GPU 物理模拟（重力/碰撞）。默认为 `false`。 |
+| `updateInterval` | GPU 计算间隔。`1` 为每 Tick 更新。调高可提升 FPS 但会降低动作流畅度。 |
+| `aggressiveMode` | 激进模式。开启后会接管所有未知生物的计算（可能导致兼容性问题）。 |
+
+---
+
+## 📝 支持的生物列表
+
+本模组内置了对 **原版 (Vanilla)** 和 **TerraFirmaCraft (TFC:TNG)** 生物的深度支持。这些生物会被自动分配到特定的 AI 行为组中。
+
+### 1. 原版生物 (Vanilla)
+
+| 实体 ID | AI 类型 | 行为逻辑 |
+|---------|---------|----------|
+| `minecraft:cow` | Livestock (家畜) | 群居，寻找食物气味，被捕食者惊吓。 |
+| `minecraft:sheep` | Livestock (家畜) | 群居，寻找食物气味。 |
+| `minecraft:pig` | Livestock (家畜) | 群居，寻找食物气味。 |
+| `minecraft:chicken` | Livestock (家畜) | 群居，低恐慌阈值。 |
+| `minecraft:horse` | Livestock (家畜) | 群居，跑得快。 |
+| `minecraft:wolf` | Predator (捕食者) | 追踪肉类气味，攻击猎物。 |
+| `minecraft:bear` | Predator (捕食者) | 追踪鱼类气味。 |
+| `minecraft:zombie` | Zombie (僵尸) | 追踪玩家气味，无视地形代价。 |
+| `minecraft:husk` | Zombie (僵尸) | 同上。 |
+| `minecraft:drowned` | Zombie (僵尸) | 同上。 |
+| `minecraft:cod` | Fish (鱼类) | 水中群游，3D Boids 行为。 |
+| `minecraft:salmon` | Fish (鱼类) | 同上。 |
+| `minecraft:squid` | Fish (鱼类) | 同上。 |
+
+### 2. TerraFirmaCraft (TFC) 生物
+
+TFC 生物拥有更复杂的参数（如不同的奔跑速度和更强的感知范围）。
+
+| 类别 | 包含的生物 (部分示例) | 特殊行为 |
+|------|----------------------|----------|
+| **大型捕食者** | `tfc:bear`, `tfc:polar_bear`, `tfc:grizzly_bear`, `tfc:black_bear`, `tfc:lion`, `tfc:tiger`, `tfc:sabertooth` | 极具攻击性，优先追踪大型猎物和玩家。 |
+| **中型捕食者** | `tfc:wolf`, `tfc:direwolf`, `tfc:hyena`, `tfc:cougar`, `tfc:panther` | 结群狩猎，速度快。 |
+| **野生猎物** | `tfc:deer`, `tfc:gazelle`, `tfc:wildebeest` | 极高的恐慌敏感度，闻到捕食者气味会立即反向逃跑。 |
+| **小型猎物** | `tfc:rabbit`, `tfc:hare`, `tfc:pheasant`, `tfc:quail`, `tfc:turkey` | 寻找灌木/谷物气味，受惊后快速四散。 |
+| **家畜** | `tfc:cow`, `tfc:sheep`, `tfc:pig`, `tfc:chicken`, `tfc:goat`, `tfc:yak`, `tfc:camel` | 典型的群居行为，受 TFC 熟悉度系统影响。 |
+
+---
+
+## 🔌 兼容性说明
+
+### ✅ TerraFirmaCraft (TFC)
+- **深度集成**：自动读取 TFC 实体的 `Familiarity` (熟悉度) 数据。
+- **物理调整**：针对 TFC 生物的体型调整了碰撞箱和质量参数。
+- **特化行为**：TFC 捕食者拥有专门的 OpenCL 逻辑分支。
+
+### 🛡️ Touhou Little Maid (车万女仆)
+- **自动排除**：为了防止破坏女仆的复杂交互逻辑，模组内置了“安全区”机制。
+- **逻辑**：任何位于 `touhou_little_maid` 实体附近的生物，会自动回退到 CPU 运算，确保您可以正常与女仆互动而不受 GPU 物理干扰。
+
+### ⚠️ 其他模组
+- **未知生物**：默认情况下，未注册的模组生物将由 CPU 处理。若开启 `aggressiveMode`，它们将被强制接管，可能导致行为异常（如只会发呆或乱跑）。
+
+---
+
+## 🔨 安装与构建
+
+### 客户端/服务端
+本模组主要在**服务端**运行核心逻辑。客户端安装可选（用于调试渲染，但非必须）。
 
 ### 构建项目
+如果您是开发者，可以使用 Gradle 构建：
+
 ```bash
+# Linux / macOS
 ./gradlew build
+
+# Windows
+gradlew.bat build
 ```
 
-### 接入 API
-其他模组可以通过获取 `GPUManager` 实例来使用 OpenCL 加速：
-
-```java
-import com.gpuaccel.entitymod.GPUEntityAccelMod;
-
-// 获取 GPU 管理器
-var gpuManager = GPUEntityAccelMod.getGPUManager();
-if (gpuManager.isGPUAvailable()) {
-    // 你的 OpenCL 代码...
-}
-```
-
-## 📄 许可证
-
-本项目采用 [MIT License](LICENSE) 开源。
+构建产物位于 `build/libs/` 目录。

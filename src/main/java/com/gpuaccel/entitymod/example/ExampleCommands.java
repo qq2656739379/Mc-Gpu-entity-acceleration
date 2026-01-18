@@ -15,10 +15,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 示例命令 - 展示如何使用 GPU 加速系统
+ * 示例命令类。
+ * <p>
+ * 提供了 /gpuaccel info 和 /gpuaccel spawn_swarm 命令，
+ * 用于测试 GPU 状态和生成测试实体群。
+ * </p>
  */
 public class ExampleCommands {
     
+    /**
+     * 注册示例命令。
+     *
+     * @param dispatcher 命令调度器
+     */
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(
             Commands.literal("gpuaccel")

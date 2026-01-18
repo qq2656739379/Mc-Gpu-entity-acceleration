@@ -15,11 +15,24 @@ import org.jocl.cl_mem;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 刺激源管理器。
+ * <p>
+ * 扫描世界中的玩家、掉落物等实体，并将其转换为“气味源” (Stimuli)，
+ * 注入到 GPU 的费洛蒙网格中。
+ * </p>
+ */
 public class StimulusManager {
 
-    // Removed static caches for thread safety
-    // Using simple local arrays - GC overhead is negligible for small arrays (12KB)
-
+    /**
+     * 扫描周边实体并注入刺激源到 GPU。
+     *
+     * @param level 服务器维度
+     * @param center 扫描中心
+     * @param gpuManager GPU 管理器
+     * @param injectKernel 注入内核
+     * @param targetBuffer 目标费洛蒙缓冲区
+     */
     public static void scanAndInject(ServerLevel level, BlockPos center, GPUManager gpuManager, cl_kernel injectKernel, cl_mem targetBuffer) {
         if (injectKernel == null || !gpuManager.isGPUAvailable()) return;
 
@@ -29,9 +42,9 @@ public class StimulusManager {
         float[] stimValue = new float[maxCount];
 
         int count = 0;
-        int range = 64; // Scan range
+        int range = 64; // 扫描半径
 
-        // 1. Players (Scent Player)
+        // 1. 玩家 (产生玩家气味)
         List<Player> players = level.getEntitiesOfClass(Player.class, new AABB(center).inflate(range));
         for (Player p : players) {
             if (count >= maxCount) break;
@@ -40,7 +53,7 @@ public class StimulusManager {
                 EntityBehaviorRegistry.SCENT_PLAYER, 5.0f);
         }
 
-        // 2. Items (Food Scent)
+        // 2. 掉落物 (产生食物气味)
         List<ItemEntity> items = level.getEntitiesOfClass(ItemEntity.class, new AABB(center).inflate(range));
         for (ItemEntity item : items) {
             if (count >= maxCount) break;

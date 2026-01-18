@@ -3,40 +3,46 @@ package com.gpuaccel.entitymod.ai;
 import com.gpuaccel.entitymod.ai.kernel.KernelCommon;
 
 /**
- * Pathfinding Kernel Source (Flow Field BFS)
+ * 寻路内核源代码 (流场 BFS)。
+ * <p>
+ * 包含三个步骤的 OpenCL 内核：
+ * 1. 初始化代价场 (Reset)
+ * 2. 波前传播/洪水填充 (Spread BFS)
+ * 3. 生成向量场 (Generate Vector Field)
+ * </p>
  */
 public class FlowFieldKernelSource {
 
     // =========================================================
-    // Kernel 1: Initialize/Reset Cost Field
+    // Kernel 1: 初始化/重置代价场
     // =========================================================
     public static final String RESET_COST_SRC = """
         #define MAP_SIZE 128
         #define MAP_SIZE_SQ (128*128)
         #define MAP_VOL (128*128*128)
 
-        #define COST_IMPASSABLE 65535  // Infinity
+        #define COST_IMPASSABLE 65535  // 无穷大 (不可通行)
         #define COST_SOLID 255
         #define COST_AIR 1
 
-        // Helper: 3D to 1D index
+        // 辅助函数: 3D 坐标转 1D 索引
         inline int getIndex(int x, int y, int z) {
             if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE || z < 0 || z >= MAP_SIZE) return -1;
             return x + (z * MAP_SIZE) + (y * MAP_SIZE_SQ);
         }
 
         __kernel void k_resetCostField(
-            __global ushort* costField,       // Output: Cost Buffer
-            __global int* targetPositions,    // Input: Target Points [x, y, z] packed
-            int targetCount                   // Input: Number of targets
+            __global ushort* costField,       // 输出: 代价缓冲区
+            __global int* targetPositions,    // 输入: 目标点列表 [x, y, z]
+            int targetCount                   // 输入: 目标数量
         ) {
             int gid = get_global_id(0);
             if (gid >= MAP_VOL) return;
 
-            // 1. Default to Infinity
+            // 1. 默认设为不可达
             costField[gid] = COST_IMPASSABLE;
 
-            // 2. Set Targets to 0 (Only thread 0 does this to avoid races)
+            // 2. 设置目标点代价为 0 (仅线程 0 执行，避免竞争)
             if (gid == 0) {
                 for (int i = 0; i < targetCount; i++) {
                     int tx = targetPositions[i*3 + 0];
@@ -53,39 +59,37 @@ public class FlowFieldKernelSource {
     """;
 
     // =========================================================
-    // Kernel 2: Wavefront Propagation (BFS)
+    // Kernel 2: 波前传播 (BFS)
     // =========================================================
     public static final String SPREAD_COST_SRC = """
         __kernel void k_spreadCostField(
-            __global ushort* costField,       // Read/Write
-            __global uchar* voxelMap          // Read Only (0=Air, 1=Solid, 2=Water...)
+            __global ushort* costField,       // 读/写
+            __global uchar* voxelMap          // 只读 (0=空气, 1=固体...)
         ) {
             int gid = get_global_id(0);
             if (gid >= MAP_VOL) return;
 
-            // 1. Unpack coords
+            // 1. 解包坐标
             int y = gid / MAP_SIZE_SQ;
             int rem = gid % MAP_SIZE_SQ;
             int z = rem / MAP_SIZE;
             int x = rem % MAP_SIZE;
 
-            // 2. Check Passability
+            // 2. 检查通行性
             uchar blockID = voxelMap[gid];
-            // Treat Solid(1), Fence(3), Danger(4) as impassable walls
+            // 固体(1), 栅栏(3), 危险(4) 视为不可通行
             if (blockID == 1 || blockID == 3 || blockID == 4) {
                 costField[gid] = COST_IMPASSABLE;
                 return;
             }
-            // Water(2) is passable but high cost for walkers, but let's keep it simple:
-            // If this is a 'General' field, we might treat water as high cost.
-            // For now, let's treat Air(0) and Water(2) as passable.
+            // 可以在此处定义不同地形的移动代价 (如水=10)
             int stepCost = (blockID == 2) ? 10 : COST_AIR;
 
-            // 3. Read Current Cost
+            // 3. 读取当前代价
             ushort currentCost = costField[gid];
             ushort minNeighbor = COST_IMPASSABLE;
 
-            // 4. Check 6 Neighbors
+            // 4. 检查 6 个邻居
             int offsets[6][3] = {
                 {1,0,0}, {-1,0,0},
                 {0,1,0}, {0,-1,0},
@@ -106,13 +110,11 @@ public class FlowFieldKernelSource {
                 }
             }
 
-            // 5. Update Logic (Relaxation)
+            // 5. 更新逻辑 (松弛操作)
             if (minNeighbor != COST_IMPASSABLE) {
-                // Determine step cost based on verticality?
-                // For now, uniform cost.
                 ushort newCost = minNeighbor + stepCost;
 
-                // Only write if cheaper (Atomic-free approximation, requires multi-pass)
+                // 仅当代价更低时写入 (多遍迭代收敛)
                 if (newCost < currentCost) {
                     costField[gid] = newCost;
                 }
@@ -121,12 +123,12 @@ public class FlowFieldKernelSource {
     """;
 
     // =========================================================
-    // Kernel 3: Vector Field Generation
+    // Kernel 3: 生成向量场
     // =========================================================
     public static final String GENERATE_VECTOR_SRC = """
         __kernel void k_generateVectorField(
-            __global ushort* costField,       // Input
-            __global float4* vectorField      // Output: Direction Vectors
+            __global ushort* costField,       // 输入
+            __global float4* vectorField      // 输出: 方向向量
         ) {
             int gid = get_global_id(0);
             if (gid >= MAP_VOL) return;
@@ -138,13 +140,13 @@ public class FlowFieldKernelSource {
 
             ushort myCost = costField[gid];
 
-            // If I am a wall, zero vector
+            // 如果自身是墙，向量为零
             if (myCost >= COST_IMPASSABLE) {
                 vectorField[gid] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
                 return;
             }
 
-            // Find lowest neighbor (Gradient Descent)
+            // 寻找代价最小的邻居 (梯度下降)
             float3 bestDir = (float3)(0.0f, 0.0f, 0.0f);
             ushort minC = myCost;
 

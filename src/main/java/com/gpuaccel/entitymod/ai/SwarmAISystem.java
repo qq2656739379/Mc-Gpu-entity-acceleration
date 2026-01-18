@@ -28,40 +28,59 @@ import java.util.*;
 
 import static org.jocl.CL.*;
 
+/**
+ * 群体智能 AI 系统核心。
+ * <p>
+ * 负责管理 GPU 加速的 Boids 算法，包括：
+ * <ul>
+ *   <li>实体筛选与分类</li>
+ *   <li>流场 (Flow Field) 更新调度</li>
+ *   <li>OpenCL 内核参数组装与执行</li>
+ *   <li>计算结果的回读与应用</li>
+ * </ul>
+ * </p>
+ */
 public class SwarmAISystem {
     private static final Logger LOGGER = LogManager.getLogger();
 
-    private static final int TYPE_FLYER = 0;
-    private static final int TYPE_ITEM = 1;
-    private static final int TYPE_XP = 2;
-    private static final int TYPE_QUEEN = 3;
-    private static final int TYPE_WALKER = 4;
-    private static final int TYPE_SWIMMER = 5;
+    // 实体类型常量 (对应 OpenCL 内核中的定义)
+    private static final int TYPE_FLYER = 0;   // 飞行生物
+    private static final int TYPE_ITEM = 1;    // 掉落物
+    private static final int TYPE_XP = 2;      // 经验球
+    private static final int TYPE_QUEEN = 3;   // 蜂后 (引导者)
+    private static final int TYPE_WALKER = 4;  // 陆行生物
+    private static final int TYPE_SWIMMER = 5; // 水生生物
 
     private final GPUManager gpuManager;
     private cl_kernel swarmKernel;
     private cl_kernel diffuseKernel;
     private cl_kernel injectKernel;
 
-    // Flow Field Kernels
+    // 流场相关内核
     private cl_kernel resetCostKernel;
     private cl_kernel spreadCostKernel;
     private cl_kernel genVectorKernel;
     
+    // 异步回读状态
     private List<Entity> pendingEntities = null;
     private int pendingEntityCount = 0;
+
     private final Map<UUID, Integer> beeStateMap = new HashMap<>();
     private Set<Integer> currentActiveEntityIds = new HashSet<>();
     private int cleanupTickCounter = 0;
-    // 冷却计时器：限制 BeeSensor 的昂贵扫描频率
+
+    // 传感器冷却计时器：限制 BeeSensor 的高开销扫描频率
     private int sensorCooldown = 0;
     
-    // Pathfinding Throttle
+    // 寻路冷却计时器
     private int pathfindingCooldown = 0;
 
-    // Ping-Pong
+    // 费洛蒙 Ping-Pong 双缓冲开关
     private boolean usePingForRead = true;
 
+    /**
+     * 构造函数：初始化 AI 系统并编译 OpenCL 内核。
+     */
     public SwarmAISystem(GPUManager gpuManager) {
         this.gpuManager = gpuManager;
         initializeKernel();
@@ -75,21 +94,31 @@ public class SwarmAISystem {
             diffuseKernel = gpuManager.compileKernel(source, "diffuse_pheromones");
             injectKernel = gpuManager.compileKernel(source, "inject_stimuli");
 
-            // Flow Field Kernels (Included in source now)
+            // 编译流场内核 (现在包含在同一源码中或单独加载)
             String flowSrc = FlowFieldKernelSource.getSource();
             resetCostKernel = gpuManager.compileKernel(flowSrc, "k_resetCostField");
             spreadCostKernel = gpuManager.compileKernel(flowSrc, "k_spreadCostField");
             genVectorKernel = gpuManager.compileKernel(flowSrc, "k_generateVectorField");
 
-            LOGGER.info("Swarm AI Kernels compiled successfully.");
+            LOGGER.info("Swarm AI 内核编译成功。");
         } catch (Exception e) {
-            LOGGER.error("Failed to compile Swarm AI Kernel", e);
+            LOGGER.error("Swarm AI 内核编译失败", e);
         }
     }
 
+    /**
+     * 计算并应用群体行为。
+     *
+     * @param level 服务器维度
+     * @param entities 待处理的实体列表
+     */
     public void computeSwarmBehavior(ServerLevel level, List<Entity> entities) {
         if (entities.isEmpty()) return;
+
+        // 应用上一帧的计算结果 (异步回读)
         applyPendingResults(level);
+
+        // 定期清理残留标签
         if (++cleanupTickCounter > 40) {
             cleanupStragglers(level);
             cleanupTickCounter = 0;
@@ -97,18 +126,19 @@ public class SwarmAISystem {
 
         List<Entity> candidateEntities = new ArrayList<>();
         List<Integer> candidateTypes = new ArrayList<>();
-        // 1. Initial Type Filter
+
+        // 1. 初步类型筛选
         filterEntities(entities, candidateEntities, candidateTypes);
 
         if (candidateEntities.isEmpty()) return;
 
-        // 2. Proximity Filter (3x3 Chunks around Players)
+        // 2. 距离筛选 (仅处理玩家周围 3x3 区块内的实体)
         List<Entity> nearEntities = new ArrayList<>();
         List<Integer> nearTypes = new ArrayList<>();
         List<Entity> farEntities = new ArrayList<>();
         List<Integer> farTypes = new ArrayList<>();
 
-        // Get player chunk positions
+        // 获取玩家所在的区块坐标集合
         Set<Long> activeChunks = new HashSet<>();
         List<net.minecraft.server.level.ServerPlayer> players = level.players();
         for (Player player : players) {
@@ -136,7 +166,7 @@ public class SwarmAISystem {
             }
         }
 
-        // 3. Fallback for Far Entities (Reset state)
+        // 3. 远距离实体回退处理 (重置状态，交回原版 AI)
         if (!farEntities.isEmpty()) {
             fallbackToCPU(level, farEntities, farTypes);
         }
@@ -147,18 +177,18 @@ public class SwarmAISystem {
             return;
         }
 
-        // 4. Update Flow Fields (Low Frequency)
+        // 4. 更新流场 (低频更新)
         updateFlowFields(level, nearEntities);
 
-        // 5. Dispatch Near Entities
+        // 5. 提交近距离实体到 GPU
         dispatchToGPU(level, nearEntities, nearTypes);
     }
 
     private void updateFlowFields(ServerLevel level, List<Entity> entities) {
         if (pathfindingCooldown-- > 0) return;
-        pathfindingCooldown = 20; // 1 second update rate
+        pathfindingCooldown = 20; // 1秒更新一次
 
-        // Collect Targets
+        // 收集各流场的目标点
         List<Integer> playerTargets = new ArrayList<>();
         List<Integer> livestockTargets = new ArrayList<>();
         List<Integer> foodTargets = new ArrayList<>();
@@ -168,7 +198,7 @@ public class SwarmAISystem {
         int oz = VoxelManager.getOriginZ();
         int size = VoxelManager.VOXEL_SIZE;
 
-        // Player Targets
+        // 玩家流场目标
         for (Player p : level.players()) {
             BlockPos pos = p.blockPosition();
             int x = pos.getX() - ox;
@@ -179,8 +209,8 @@ public class SwarmAISystem {
             }
         }
 
-        // Livestock Targets (Cows, Pigs, etc)
-        // We scan 'entities' list because it contains near entities.
+        // 家畜流场目标 (Cow, Pig, etc)
+        // 扫描 entities 列表，因为它包含了附近的实体
         for (Entity e : entities) {
             String id = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(e.getType()).toString();
             boolean isLivestock = id.contains("cow") || id.contains("sheep") || id.contains("pig") || id.contains("chicken");
@@ -195,13 +225,10 @@ public class SwarmAISystem {
             }
         }
 
-        // Food Targets (Water, Grass) - Simplified: Just Water for now
-        // A real implementation would scan the VoxelMap for 'Food' blocks, but that's expensive.
-        // For now, let's skip food field or assume Water bodies are targets for thirsty animals.
-        // Or we inject "Water" manually if we knew where it was.
-        // Let's leave Food empty for now to save performance, or use Player as dummy.
+        // 食物/水源目标
+        // 目前简化处理，或者留空以节省性能。完整实现需要扫描 VoxelMap 寻找特定的 BlockState。
 
-        // Execute Updates
+        // 执行流场更新
         if (!playerTargets.isEmpty()) {
              gpuManager.updateFlowField(GPUManager.FIELD_PLAYER, playerTargets, resetCostKernel, spreadCostKernel, genVectorKernel);
         }
@@ -215,6 +242,8 @@ public class SwarmAISystem {
             int entityCount = filteredEntities.size();
             boolean hasFlyers = false;
             for(int t : entityTypes) if(t == TYPE_FLYER || t == TYPE_QUEEN) { hasFlyers = true; break; }
+
+            // 如果包含飞行生物，执行环境扫描 (花朵/蜂巢)
             if (hasFlyers) {
                 if (sensorCooldown-- <= 0) {
                     sensorCooldown = 40;
@@ -224,6 +253,7 @@ public class SwarmAISystem {
                 }
             }
 
+            // 准备缓冲区
             GPUManager.SwarmBuffers buffers = gpuManager.ensureSwarmBuffers(entityCount);
             gpuManager.ensureBeeStates(entityCount);
             fillBuffers(filteredEntities, entityTypes, buffers);
@@ -231,13 +261,16 @@ public class SwarmAISystem {
             Vec3 playerPos = level.players().isEmpty() ? Vec3.ZERO : level.players().get(0).position();
             buffers.playerPos().put(0, (float)playerPos.x).put(1, (float)playerPos.y).put(2, (float)playerPos.z);
 
+            // 上传数据到 GPU
             uploadBuffersToGPU(entityCount, buffers, filteredEntities);
 
+            // 如果体素地图有变动，上传新数据
             if (VoxelManager.isDirty()) {
                 gpuManager.writeVoxelBuffer(VoxelManager.getVoxelBuffer());
                 VoxelManager.clearDirty();
             }
             
+            // 费洛蒙扩散与刺激源注入
             if (diffuseKernel != null) {
                 cl_mem inputMap = usePingForRead ? gpuManager.getPheromoneMemA() : gpuManager.getPheromoneMemB();
                 cl_mem outputMap = usePingForRead ? gpuManager.getPheromoneMemB() : gpuManager.getPheromoneMemA();
@@ -253,30 +286,33 @@ public class SwarmAISystem {
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{VoxelManager.PHERO_SIZE_XZ}));
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{VoxelManager.PHERO_SIZE_Y}));
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_int, Pointer.to(new int[]{VoxelManager.PHERO_SIZE_XZ})); 
-                clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_float, Pointer.to(new float[]{0.1f})); 
-                clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_float, Pointer.to(new float[]{0.99f})); 
+                clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_float, Pointer.to(new float[]{0.1f})); // 扩散率
+                clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_float, Pointer.to(new float[]{0.99f})); // 衰减率
                 clSetKernelArg(diffuseKernel, argIdx++, Sizeof.cl_float, Pointer.to(new float[]{0.05f})); 
 
                 long[] diffuseWorkSize = new long[]{VoxelManager.PHERO_VOLUME};
                 gpuManager.executeKernelAsync(diffuseKernel, 1, diffuseWorkSize, null);
                 
+                // 交换 Ping-Pong 缓冲区
                 usePingForRead = !usePingForRead;
             }
 
-            // 🚀 主计算
+            // 🚀 执行主计算内核
             cl_mem currentPheroMap = usePingForRead ? gpuManager.getPheromoneMemA() : gpuManager.getPheromoneMemB();
             setKernelArguments(entityCount, buffers, level, currentPheroMap);
 
             long[] globalWorkSize = new long[]{entityCount};
             gpuManager.executeKernelAsync(swarmKernel, 1, globalWorkSize, null);
             
+            // 交换双缓冲，准备下一帧
             gpuManager.swapEntityBuffers();
 
+            // 记录挂起的实体列表，用于下一帧回读
             pendingEntities = new ArrayList<>(filteredEntities);
             pendingEntityCount = entityCount;
 
         } catch (Exception e) {
-            LOGGER.error("GPU Dispatch Failed", e);
+            LOGGER.error("GPU 调度失败", e);
             pendingEntities = null;
             pendingEntityCount = 0;
             fallbackToCPU(level, filteredEntities, entityTypes);
@@ -291,6 +327,7 @@ public class SwarmAISystem {
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(buffers.entityTypesMem()));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(buffers.playerPosMem()));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_int, Pointer.to(new int[]{count}));
+        // 填充占位参数
         for(int i=0; i<12; i++) clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float, Pointer.to(new float[]{0f}));
         
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getAttrXMem()));
@@ -327,6 +364,7 @@ public class SwarmAISystem {
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_float, Pointer.to(new float[]{worldTime}));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_int, Pointer.to(new int[]{isRaining}));
 
+        // 计算风力参数 (根据雨量)
         float[] wind = new float[]{0f, 0f, 0f};
         float rainIntensity = level.getRainLevel(1.0f);
         if (level.isThundering()) rainIntensity = 1.0f;
@@ -340,7 +378,7 @@ public class SwarmAISystem {
 
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(buffers.paramsMem()));
 
-        // --- Pass Flow Field Buffers ---
+        // --- 传递流场缓冲区 ---
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getVectorFieldMem(GPUManager.FIELD_PLAYER)));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getVectorFieldMem(GPUManager.FIELD_LIVESTOCK)));
         clSetKernelArg(swarmKernel, argIndex++, Sizeof.cl_mem, Pointer.to(gpuManager.getVectorFieldMem(GPUManager.FIELD_FOOD)));
@@ -365,6 +403,7 @@ public class SwarmAISystem {
                 double vy = outputBuf.get(idx+1);
                 double vz = outputBuf.get(idx+2);
                 
+                // 数据安全性检查
                 if (!Double.isFinite(vx)) { vx=0; vy=0; vz=0; }
                 else {
                     vx = Mth.clamp(vx, -2.0, 2.0);
@@ -372,15 +411,18 @@ public class SwarmAISystem {
                     vz = Mth.clamp(vz, -2.0, 2.0);
                 }
                 
+                // 微小速度过滤，防止抖动
                 if (Math.abs(vx) < 0.001 && Math.abs(vy) < 0.001 && Math.abs(vz) < 0.001) {
                      vx=0; vy=0; vz=0;
                 }
                 entity.setDeltaMovement(vx, vy, vz);
 
+                // 更新朝向 (Yaw) 以匹配移动方向
                 double hSpeedSq = vx * vx + vz * vz;
                 if (hSpeedSq > 0.004) { 
                     float targetYaw = (float) (Math.atan2(vz, vx) * (180.0D / Math.PI)) - 90.0F;
 
+                    // 山羊的 "太空步" 修复: 速度与朝向相反
                     String eid = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.getKey(entity.getType()).toString();
                     boolean isGoat = (entity instanceof net.minecraft.world.entity.animal.goat.Goat) || eid.contains("goat");
                     if (isGoat) {
@@ -409,21 +451,27 @@ public class SwarmAISystem {
         if (!GPUAccelConfig.ENABLE_SWARM_AI_GPU.get()) return false;
         return count >= GPUAccelConfig.MIN_ENTITIES_FOR_GPU.get();
     }
+
+    /**
+     * 回退到 CPU 模式：移除 GPU 标签，恢复重力，减速。
+     */
     private void fallbackToCPU(ServerLevel level, List<Entity> entities, List<Integer> types) {
         for (Entity e : entities) {
             if (e instanceof Mob m && m.getTags().contains("gpu_active")) {
                 m.removeTag("gpu_active");
                 m.setNoGravity(false);
+                // 稍微减速，平滑过渡
                 m.setDeltaMovement(e.getDeltaMovement().multiply(0.5, 0.5, 0.5));
             }
         }
     }
+
     private void filterEntities(List<Entity> input, List<Entity> output, List<Integer> types) {
         for (Entity e : input) {
             if (e instanceof Player) continue;
             if (e instanceof AbstractVillager) continue;
 
-            // Check for Birds / Parrots
+            // 检查是否为鸟类/鹦鹉
             boolean isBird = e.getType().getDescriptionId().contains("parrot") ||
                              e.getType().getDescriptionId().contains("bird") ||
                              e.getType().getDescriptionId().contains("eagle") ||
@@ -435,13 +483,14 @@ public class SwarmAISystem {
                 output.add(e);
                 if (e instanceof WaterAnimal || e instanceof net.minecraft.world.entity.animal.Squid) types.add(TYPE_SWIMMER);
                 else if (e instanceof FlyingAnimal || e instanceof Bee || e instanceof Bat || isBird) {
-                    // Reuse Bee Logic for Birds
+                    // 复用蜜蜂逻辑给鸟类
                     if (e instanceof Bee && (e.getTags().contains("queen") || (e.hasCustomName() && e.getCustomName().getString().contains("Queen")))) types.add(TYPE_QUEEN);
                     else types.add(TYPE_FLYER);
                 } else types.add(TYPE_WALKER);
             }
         }
     }
+
     private void fillBuffers(List<Entity> entities, List<Integer> types, GPUManager.SwarmBuffers buffers) {
         FloatBuffer posBuf = buffers.positions();
         FloatBuffer velBuf = buffers.velocities();
@@ -471,6 +520,7 @@ public class SwarmAISystem {
         posBuf.position(0); velBuf.position(0); typeBuf.position(0); 
         buffers.playerPos().position(0); paramsBuf.position(0); 
     }
+
     private void uploadBuffersToGPU(int count, GPUManager.SwarmBuffers buffers, List<Entity> entities) {
         long size3 = (long)count * 3 * Sizeof.cl_float;
         long size1 = (long)count * Sizeof.cl_int;
@@ -482,12 +532,14 @@ public class SwarmAISystem {
         gpuManager.writeBuffer(buffers.paramsMem(), sizeP, Pointer.to(buffers.params())); 
         gpuManager.writeBeeStatesFromEntities(entities, beeStateMap);
     }
+
     private float rotLerp(float start, float end, float factor) {
         float diff = end - start;
         while (diff < -180.0F) diff += 360.0F;
         while (diff >= 180.0F) diff -= 360.0F;
         return start + diff * factor;
     }
+
     public void cleanup() {
         if (swarmKernel != null) clReleaseKernel(swarmKernel);
         if (diffuseKernel != null) clReleaseKernel(diffuseKernel);
@@ -496,6 +548,7 @@ public class SwarmAISystem {
         if (spreadCostKernel != null) clReleaseKernel(spreadCostKernel);
         if (genVectorKernel != null) clReleaseKernel(genVectorKernel);
     }
+
     public void cleanupStragglers(ServerLevel level) {
         try {
             for (Entity ent : level.getAllEntities()) {
@@ -508,6 +561,7 @@ public class SwarmAISystem {
             }
         } catch (Throwable ignored) { }
     }
+
     public void clearGpuTags(net.minecraft.server.MinecraftServer server) {
         if (server == null) return;
         try {

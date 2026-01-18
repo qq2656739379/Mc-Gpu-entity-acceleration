@@ -11,7 +11,11 @@ import java.nio.FloatBuffer;
 import static org.jocl.CL.*;
 
 /**
- * GPU 加速的气候系统 (非阻塞优化版)
+ * GPU 加速的气候系统。
+ * <p>
+ * 使用 OpenCL 计算全图的温度、湿度和风场。
+ * 采用了非阻塞 (Non-blocking) 的数据写入和执行方式，以减少对主线程的影响。
+ * </p>
  */
 public class ClimateSystem {
     private final GPUManager gpuManager;
@@ -30,6 +34,7 @@ public class ClimateSystem {
     
     private int allocatedSize = 0;
 
+    // 简单的气候计算内核 (OpenCL C)
     private static final String KERNEL_SOURCE = """
         __kernel void compute_climate(
             __global const float* baseTemp,
@@ -46,6 +51,7 @@ public class ClimateSystem {
 
             float t = baseTemp[idx] + seasonMod[idx] + latitudeMod[idx];
 
+            // 简单的平滑处理 (模拟热扩散)
             float sum = 0.0f;
             int count = 0;
             if (x > 0) { sum += baseTemp[idx - 1]; count++; }
@@ -93,6 +99,7 @@ public class ClimateSystem {
             for (int x = 0; x < width; x++) {
                 int gz = cz + (z - halfH);
                 int idx = z * width + x;
+                // 模拟温度随距离降低
                 float temp = 15.0f - ((float)Math.abs(gz) / 256.0f) * 20.0f;
                 
                 baseTempBuf.put(idx, temp);

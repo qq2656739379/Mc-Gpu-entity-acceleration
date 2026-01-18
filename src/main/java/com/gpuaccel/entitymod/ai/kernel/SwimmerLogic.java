@@ -1,5 +1,11 @@
 package com.gpuaccel.entitymod.ai.kernel;
 
+/**
+ * 水生生物逻辑内核。
+ * <p>
+ * 适用于鱼类、鱿鱼等。包含 3D 水中游动、群聚行为和离水处理。
+ * </p>
+ */
 public class SwimmerLogic {
     public static final String SRC = """
         float3 update_swimmer(
@@ -23,25 +29,27 @@ public class SwimmerLogic {
             float mass            = params[pBase + 8];
             int flags            = (int)params[pBase + 11];
 
+            // 标志位 1: 海洋生物 (支持地下无重力/飞行模式)
             bool isMarine = (flags & 1) != 0;
             
-            if (mass < 0.1f) mass = 0.1f; // 🛡️ 安全防御
+            if (mass < 0.1f) mass = 0.1f;
 
             char voxelAtBody = get_voxel(pos, voxels, mapOX, mapOY, mapOZ, mapSize);
             bool inWater = (voxelAtBody == VOXEL_LIQUID);
 
-            // Marine "Fly-Swim" Logic (Swim in air, No gravity underground)
+            // 海洋生物特殊逻辑：假装始终在水中 (用于地下穿梭或飞行模式)
             if (isMarine) {
-                inWater = true; // Pretend we are always in water
-                // Add Y drag manually since we aren't using the !inWater gravity block
-                vel *= 0.92f;
+                inWater = true;
+                vel *= 0.92f; // 手动施加阻力
             }
 
+            // 搁浅逻辑：不在水中且非 Marine
             if (!inWater) {
-                vel.y -= 0.08f; 
+                vel.y -= 0.08f; // 重力
                 char voxelBelow = get_voxel(pos + (float3)(0, -0.6f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
                 if (voxelBelow == VOXEL_SOLID) {
-                    vel.x *= 0.5f; vel.z *= 0.5f;
+                    vel.x *= 0.5f; vel.z *= 0.5f; // 地面摩擦
+                    // 扑腾效果 (Flop)
                     if ((int)(time * 20 + gid) % 15 == 0) {
                         float3 flop = hash33((float3)(gid, time, 0));
                         vel.x += (flop.x - 0.5f) * 0.3f; vel.z += (flop.z - 0.5f) * 0.3f; vel.y = 0.25f;
@@ -51,24 +59,28 @@ public class SwimmerLogic {
             }
 
             float3 acc = (float3)(0);
+
+            // 垂直方向浮力控制 (保持在水中)
             if (!isMarine) {
                 vel *= 0.92f; vel.y -= 0.001f;
 
                 char vUp = get_voxel(pos + (float3)(0, 1.0f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
-                if (vUp == VOXEL_AIR) acc.y -= 0.05f / mass;
+                if (vUp == VOXEL_AIR) acc.y -= 0.05f / mass; // 水面反弹
                 char vDown = get_voxel(pos + (float3)(0, -1.0f, 0), voxels, mapOX, mapOY, mapOZ, mapSize);
-                if (vDown == VOXEL_SOLID) acc.y += 0.05f / mass;
+                if (vDown == VOXEL_SOLID) acc.y += 0.05f / mass; // 水底反弹
             }
 
-            // Apply Wind (reduced effect in water, full effect for Marine flyer)
+            // 应用风力 (水中影响减弱)
             if (isMarine) acc += windForce * 0.5f;
             else acc += windForce * 0.1f;
 
             if (!lodActive) {
+                // 闲逛噪声
                 float noise = sin(dot(pos, (float3)(0.3f, 0.7f, 0.4f)) + time * 0.3f + (float)gid);
                 float3 wander = (float3)(cos(noise*5.0f), sin(noise*3.0f)*0.3f, sin(noise*5.0f));
                 acc += wander * wanderStrength / mass;
 
+                // 群体行为 (Boids)
                 float3 sep=(float3)(0), ali=(float3)(0), coh=(float3)(0);
                 int count = 0; float visRadSq = 16.0f; 
                 uint seed = gid + (uint)(time * 150);
@@ -79,7 +91,7 @@ public class SwimmerLogic {
                     if (entityCount < 32) i = k;
                     else { seed = next_rand(seed); i = seed % entityCount; }
                     if (i==gid) continue;
-                    if (entityTypes[i] != 5) continue; 
+                    if (entityTypes[i] != 5) continue; // 仅与水生生物互动
                     
                     int oIdx = i * 3;
                     float3 oPos = (float3)(positions[oIdx], positions[oIdx+1], positions[oIdx+2]);
@@ -95,7 +107,6 @@ public class SwimmerLogic {
                 }
                 if (count > 0) {
                     coh = (coh / (float)count) - pos; ali = ali / (float)count;
-                    // 🛡️ 安全防御: 使用 safe_normalize
                     acc += safe_normalize(sep) * separationWeight / mass;
                     acc += safe_normalize(ali) * alignmentWeight / mass;
                     acc += safe_normalize(coh) * cohesionWeight / mass;
@@ -104,10 +115,12 @@ public class SwimmerLogic {
                 acc += hash33((float3)(gid, time * 0.1f, 0)) * 0.01f;
             }
 
+            // 避障 (简单的向前探测)
             float speed = length(vel);
             if (speed > 0.01f) {
                 float3 fwd = vel / speed;
                 float3 lookAhead = pos + fwd * 2.0f;
+                // 如果前方不是水，转向
                 if (get_voxel(lookAhead, voxels, mapOX, mapOY, mapOZ, mapSize) != VOXEL_LIQUID) {
                     acc -= fwd * 0.2f / mass; acc += hash33((float3)(gid, time, 1)) * 0.1f; 
                 }

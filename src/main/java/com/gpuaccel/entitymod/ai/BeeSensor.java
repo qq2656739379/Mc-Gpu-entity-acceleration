@@ -11,6 +11,12 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 蜜蜂环境传感器。
+ * <p>
+ * 扫描指定区域内的花朵和蜂巢位置，供 GPU 蜜蜂 AI 使用。
+ * </p>
+ */
 public class BeeSensor {
     // 公开字段供 GPUManager 读取
     public static int flowerCount = 0;
@@ -26,6 +32,9 @@ public class BeeSensor {
     private static final List<Long> tempFlowers = new ArrayList<>();
     private static final List<Long> tempHives = new ArrayList<>();
 
+    /**
+     * 扫描中心点周围的花朵和蜂巢。
+     */
     public static void scan(Level level, BlockPos center) {
         tempFlowers.clear();
         tempHives.clear();

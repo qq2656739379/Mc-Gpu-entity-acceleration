@@ -17,6 +17,13 @@ import java.util.UUID;
 
 import static org.jocl.CL.*;
 
+/**
+ * GPU 资源管理器。
+ * <p>
+ * 负责 OpenCL 上下文的创建、命令队列管理、显存 (Buffer) 分配与释放，
+ * 以及 Host-Device 之间的数据传输。
+ * </p>
+ */
 public class GPUManager {
     private static final Logger LOGGER = LogManager.getLogger();
     
@@ -25,9 +32,12 @@ public class GPUManager {
     private cl_device_id device;
     private boolean gpuAvailable = false;
 
+    /** 双缓冲槽位数量 */
     private static final int SWAP_SLOTS = 2;
     
-    // Buffers (Java Side)
+    // ==========================================
+    // Java 端缓冲区 (Host Buffers)
+    // ==========================================
     private FloatBuffer[] positionsBuffers = new FloatBuffer[SWAP_SLOTS];
     private FloatBuffer[] velocitiesBuffers = new FloatBuffer[SWAP_SLOTS];
     private FloatBuffer[] outputsBuffers = new FloatBuffer[SWAP_SLOTS];
@@ -35,7 +45,9 @@ public class GPUManager {
     private FloatBuffer[] playerPosBuffers = new FloatBuffer[SWAP_SLOTS];
     private FloatBuffer[] paramsBuffers = new FloatBuffer[SWAP_SLOTS];
     
-    // Buffers (GPU Side)
+    // ==========================================
+    // GPU 端缓冲区 (Device Buffers / cl_mem)
+    // ==========================================
     private cl_mem[] positionsMems = new cl_mem[SWAP_SLOTS];
     private cl_mem[] velocitiesMems = new cl_mem[SWAP_SLOTS];
     private cl_mem[] outputsMems = new cl_mem[SWAP_SLOTS];
@@ -43,22 +55,22 @@ public class GPUManager {
     private cl_mem[] playerPosMems = new cl_mem[SWAP_SLOTS];
     private cl_mem[] paramsMems = new cl_mem[SWAP_SLOTS];
     
-    // Unstuck
+    // 防卡死机制 (Unstuck)
     private FloatBuffer[] prevPositionsBuffers = new FloatBuffer[SWAP_SLOTS];
     private cl_mem[] prevPositionsMems = new cl_mem[SWAP_SLOTS];
     private IntBuffer[] stuckTimerBuffers = new IntBuffer[SWAP_SLOTS];
     private cl_mem[] stuckTimerMems = new cl_mem[SWAP_SLOTS];
     
-    // Bee States
+    // 蜜蜂状态相关
     private cl_mem beeStatesMem;
     private int beeStatesCapacity = 0;
     private int[] beeStatesCache = null;
 
-    // Attributes
+    // 属性缓冲区 (用于传感器数据等)
     private cl_mem attrXMem, attrYMem, attrZMem, attrTypeMem;
     private int attrCapacity = 0;
 
-    // Stimulus Injection Buffers
+    // 刺激源注入缓冲区
     private cl_mem[] stimPosMems = new cl_mem[SWAP_SLOTS];
     private cl_mem[] stimChannelMems = new cl_mem[SWAP_SLOTS];
     private cl_mem[] stimValueMems = new cl_mem[SWAP_SLOTS];
@@ -68,13 +80,13 @@ public class GPUManager {
     private FloatBuffer[] stimValueBuffers = new FloatBuffer[SWAP_SLOTS];
     private int stimCapacity = 0;
     
-    // Pheromone Ping-Pong Buffers
+    // 费洛蒙乒乓缓冲区 (Ping-Pong)
     private cl_mem pheromoneMemA;
     private cl_mem pheromoneMemB;
     
-    // Flow Field Buffers (Cost Field & Vector Field)
-    // We maintain 3 sets of Flow Fields: Player, Livestock, Food
-    // Cost Field uses 'ushort' (16-bit), Vector Field uses 'float4'
+    // 流场缓冲区 (代价场与向量场)
+    // 我们维护 3 套流场：玩家目标、家畜目标、食物目标
+    // 代价场使用 'ushort' (16-bit)，向量场使用 'float4'
     public static final int FIELD_PLAYER = 0;
     public static final int FIELD_LIVESTOCK = 1;
     public static final int FIELD_FOOD = 2;
@@ -82,16 +94,16 @@ public class GPUManager {
 
     private cl_mem[] costFieldMems = new cl_mem[FIELD_COUNT];
     private cl_mem[] vectorFieldMems = new cl_mem[FIELD_COUNT];
-    private IntBuffer targetPosBuffer; // Reusable buffer for uploading targets
+    private IntBuffer targetPosBuffer; // 用于上传目标位置的可复用缓冲区
     private cl_mem targetPosMem;
     private int targetPosCapacity = 0;
 
-    // Voxels
+    // 体素地图缓冲区
     private cl_mem voxelMem;
     
     public static int[] currentMapOrigin = new int[3];
 
-    // Readback
+    // 回读缓冲区 (Readback)
     public FloatBuffer readBackX, readBackY, readBackZ;
     private FloatBuffer outHost; 
     
@@ -99,8 +111,8 @@ public class GPUManager {
     private int bufferCapacityInts = 0;
     private int bufferCapacityParams = 0;
     
-    // Device Info
-    private String deviceName = "Unknown";
+    // 设备信息
+    private String deviceName = "未知";
     private long maxComputeUnits = 0;
     private long globalMemorySize = 0;
 
@@ -108,15 +120,21 @@ public class GPUManager {
     private int pendingIndex = -1;
     private boolean hasPendingFrame = false;
 
+    /**
+     * 构造函数：初始化 OpenCL 环境。
+     */
     public GPUManager() {
         try {
             initializeOpenCL();
         } catch (Exception e) {
-            LOGGER.error("Failed to initialize OpenCL", e);
+            LOGGER.error("OpenCL 初始化失败", e);
             gpuAvailable = false;
         }
     }
 
+    /**
+     * 初始化 OpenCL 平台、设备、上下文和命令队列。
+     */
     private void initializeOpenCL() {
         CL.setExceptionsEnabled(true);
         int[] numPlatforms = new int[1];
@@ -140,7 +158,7 @@ public class GPUManager {
         context = clCreateContext(contextProperties, 1, new cl_device_id[]{device}, null, null, null);
         commandQueue = clCreateCommandQueue(context, device, 0, null);
 
-        // Info
+        // 获取设备信息
         byte[] nameBuf = new byte[256];
         long[] size = new long[1];
         clGetDeviceInfo(device, CL_DEVICE_NAME, 256, Pointer.to(nameBuf), size);
@@ -152,7 +170,7 @@ public class GPUManager {
         clGetDeviceInfo(device, CL_DEVICE_GLOBAL_MEM_SIZE, Sizeof.cl_long, Pointer.to(val), null);
         globalMemorySize = val[0];
 
-        // Init Buffers (Expanded for Multi-Channel)
+        // 初始化缓冲区 (扩展为多通道费洛蒙)
         long pheroBytes = (long)VoxelManager.PHERO_VOLUME * VoxelManager.PHERO_CHANNELS * Sizeof.cl_float;
 
         pheromoneMemA = clCreateBuffer(context, CL_MEM_READ_WRITE, pheroBytes, null, null);
@@ -164,7 +182,7 @@ public class GPUManager {
 
         voxelMem = clCreateBuffer(context, CL_MEM_READ_ONLY, VoxelManager.VOXEL_VOLUME, null, null);
         
-        // Init Flow Fields
+        // 初始化流场缓冲区
         long costBytes = (long)VoxelManager.VOXEL_VOLUME * Sizeof.cl_ushort;
         long vecBytes = (long)VoxelManager.VOXEL_VOLUME * 4 * Sizeof.cl_float; // float4
 
@@ -183,6 +201,12 @@ public class GPUManager {
         FloatBuffer prevPositions, IntBuffer stuckTimer, cl_mem prevPositionsMem, cl_mem stuckTimerMem
     ) {}
 
+    /**
+     * 确保存储实体数据的缓冲区足够大。如果需要扩容，则释放旧内存并分配新内存。
+     *
+     * @param entityCount 当前实体数量
+     * @return 包含当前帧可用缓冲区的记录对象
+     */
     public SwarmBuffers ensureSwarmBuffers(int entityCount) {
         if (!gpuAvailable) return null;
         if (entityCount > bufferCapacityInts || bufferCapacityInts == 0) {
@@ -228,12 +252,21 @@ public class GPUManager {
         );
     }
 
+    /**
+     * 交换双缓冲区的索引。
+     */
     public void swapEntityBuffers() {
         pendingIndex = activeBuffer;
         hasPendingFrame = true;
         activeBuffer = (activeBuffer + 1) % SWAP_SLOTS;
     }
 
+    /**
+     * 从挂起帧（上一帧计算结果）同步输出数据到 Host。
+     *
+     * @param count 实体数量
+     * @return 如果成功读取则返回 true
+     */
     public boolean syncOutputsFromPending(int count) {
         if (!gpuAvailable || !hasPendingFrame || pendingIndex == -1) return false;
         long sizeBytes = (long) count * 3 * 4;
@@ -259,6 +292,9 @@ public class GPUManager {
         }
     }
     
+    /**
+     * 将花朵和蜂巢的位置信息写入 GPU 属性缓冲区。
+     */
     public void writeAttrFromSensor() {
         if (!gpuAvailable) return;
         ensureAttrBuffers();
@@ -319,6 +355,13 @@ public class GPUManager {
         return beeStatesCache;
     }
 
+    /**
+     * 编译 OpenCL 内核。
+     *
+     * @param source 内核源代码字符串
+     * @param name 内核函数名
+     * @return 编译好的 cl_kernel 对象
+     */
     public cl_kernel compileKernel(String source, String name) {
         cl_program prog = clCreateProgramWithSource(context, 1, new String[]{source}, null, null);
         int err = clBuildProgram(prog, 0, null, null, null, null);
@@ -328,26 +371,36 @@ public class GPUManager {
              byte[] logData = new byte[(int)logSize[0]];
              clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG, logSize[0], Pointer.to(logData), null);
              String buildLog = new String(logData, 0, logData.length - 1);
-             LOGGER.error("OpenCL Build Error for {}:\n{}", name, buildLog);
-             throw new RuntimeException("OpenCL compilation failed: " + name);
+             LOGGER.error("{} 的 OpenCL 构建错误:\n{}", name, buildLog);
+             throw new RuntimeException("OpenCL 编译失败: " + name);
         }
         return clCreateKernel(prog, name, null);
     }
 
+    /**
+     * 将体素数据写入 GPU 缓冲区。
+     */
     public void writeVoxelBuffer(ByteBuffer data) {
         if (!gpuAvailable) return;
         if (voxelMem == null) voxelMem = clCreateBuffer(context, CL_MEM_READ_ONLY, VoxelManager.VOXEL_VOLUME, null, null);
         if (data != null) clEnqueueWriteBuffer(commandQueue, voxelMem, CL_TRUE, 0, (long)data.capacity(), Pointer.to(data), 0, null, null);
     }
     
-    // --- Flow Field Management ---
+    // --- 流场管理 ---
+
+    /**
+     * 更新指定 ID 的流场（代价场和向量场）。
+     * <p>
+     * 过程：上传目标 -> 重置代价场 -> 洪水填充 (Flood Fill) -> 生成向量场
+     * </p>
+     */
     public void updateFlowField(int fieldID, List<Integer> targets, cl_kernel resetK, cl_kernel spreadK, cl_kernel genK) {
         if (!gpuAvailable || fieldID < 0 || fieldID >= FIELD_COUNT) return;
 
         int targetCount = targets.size() / 3;
-        if (targetCount == 0) return; // No targets, maybe skip
+        if (targetCount == 0) return; // 无目标，跳过
 
-        // 1. Upload Targets
+        // 1. 上传目标
         ensureTargetBuffer(targetCount);
         targetPosBuffer.clear();
         for(int i : targets) targetPosBuffer.put(i);
@@ -357,7 +410,7 @@ public class GPUManager {
         cl_mem costMem = costFieldMems[fieldID];
         cl_mem vecMem = vectorFieldMems[fieldID];
 
-        // 2. Reset Cost Field
+        // 2. 重置代价场
         clSetKernelArg(resetK, 0, Sizeof.cl_mem, Pointer.to(costMem));
         clSetKernelArg(resetK, 1, Sizeof.cl_mem, Pointer.to(targetPosMem));
         clSetKernelArg(resetK, 2, Sizeof.cl_int, Pointer.to(new int[]{targetCount}));
@@ -365,8 +418,8 @@ public class GPUManager {
         long[] global = new long[]{VoxelManager.VOXEL_VOLUME};
         clEnqueueNDRangeKernel(commandQueue, resetK, 1, null, global, null, 0, null, null);
 
-        // 3. Flood Fill (Multiple Passes)
-        // 64 passes allows reaching 64 blocks away.
+        // 3. 洪水填充 (多轮迭代)
+        // 64 轮允许传播 64 格远。
         clSetKernelArg(spreadK, 0, Sizeof.cl_mem, Pointer.to(costMem));
         clSetKernelArg(spreadK, 1, Sizeof.cl_mem, Pointer.to(voxelMem));
 
@@ -374,7 +427,7 @@ public class GPUManager {
              clEnqueueNDRangeKernel(commandQueue, spreadK, 1, null, global, null, 0, null, null);
         }
 
-        // 4. Generate Vectors
+        // 4. 生成向量场
         clSetKernelArg(genK, 0, Sizeof.cl_mem, Pointer.to(costMem));
         clSetKernelArg(genK, 1, Sizeof.cl_mem, Pointer.to(vecMem));
         clEnqueueNDRangeKernel(commandQueue, genK, 1, null, global, null, 0, null, null);
@@ -398,7 +451,7 @@ public class GPUManager {
         return vectorFieldMems[id];
     }
 
-    // --- 🚀 兼容层：恢复旧方法以修复编译错误 ---
+    // --- 兼容层方法 ---
     
     public void writeBufferAsync(cl_mem mem, long size, FloatBuffer buffer) {
         if (!gpuAvailable) return;
@@ -426,11 +479,14 @@ public class GPUManager {
         clFlush(commandQueue);
     }
 
+    /**
+     * 注入刺激源（费洛蒙）到网格中。
+     */
     public void injectStimuli(float[] positions, int[] channels, float[] values, int count, cl_kernel injectKernel, cl_mem targetBuffer) {
         if (!gpuAvailable || count == 0) return;
 
         if (count > stimCapacity) {
-            // Free all existing double buffers
+            // 释放旧的缓冲区
             for (int i = 0; i < SWAP_SLOTS; i++) {
                 if (stimPosMems[i] != null) clReleaseMemObject(stimPosMems[i]);
                 if (stimChannelMems[i] != null) clReleaseMemObject(stimChannelMems[i]);
@@ -443,23 +499,23 @@ public class GPUManager {
 
             stimCapacity = count + 256;
 
-            // Allocate new Direct Buffers and OpenCL buffers for all slots
+            // 分配新的 Direct Buffers 和 OpenCL 缓冲区
             for (int i = 0; i < SWAP_SLOTS; i++) {
                 stimPosBuffers[i] = MemoryUtil.memAllocFloat(stimCapacity * 3);
                 stimChannelBuffers[i] = MemoryUtil.memAllocInt(stimCapacity);
                 stimValueBuffers[i] = MemoryUtil.memAllocFloat(stimCapacity);
 
-                // Create buffers without copying host ptr, since we write immediately after
+                // 创建 Buffer，不需要 copy host ptr，因为马上会写入
                 stimPosMems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 3 * 4, null, null);
                 stimChannelMems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
                 stimValueMems[i] = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)stimCapacity * 4, null, null);
             }
         }
 
-        // Use activeBuffer to select the current slot (double buffering)
+        // 使用 activeBuffer 选择当前槽位 (双缓冲)
         int idx = activeBuffer;
 
-        // Fill buffers
+        // 填充 Buffer
         stimPosBuffers[idx].clear().put(positions, 0, count * 3).flip();
         stimChannelBuffers[idx].clear().put(channels, 0, count).flip();
         stimValueBuffers[idx].clear().put(values, 0, count).flip();
@@ -468,7 +524,7 @@ public class GPUManager {
         clEnqueueWriteBuffer(commandQueue, stimChannelMems[idx], CL_FALSE, 0, (long)count * 4, Pointer.to(stimChannelBuffers[idx]), 0, null, null);
         clEnqueueWriteBuffer(commandQueue, stimValueMems[idx], CL_FALSE, 0, (long)count * 4, Pointer.to(stimValueBuffers[idx]), 0, null, null);
 
-        // Execute Inject Kernel
+        // 执行注入内核
         // void inject_stimuli(phero, pos, ch, val, count, ox, oy, oz, sxz, sy)
         int argIdx = 0;
         clSetKernelArg(injectKernel, argIdx++, Sizeof.cl_mem, Pointer.to(targetBuffer));
@@ -540,7 +596,7 @@ public class GPUManager {
         if (attrTypeMem != null) clReleaseMemObject(attrTypeMem);
         if (beeStatesMem != null) clReleaseMemObject(beeStatesMem);
 
-        // Cleanup Flow Fields
+        // 清理流场资源
         for(int i=0; i<FIELD_COUNT; i++) {
             if(costFieldMems[i] != null) clReleaseMemObject(costFieldMems[i]);
             if(vectorFieldMems[i] != null) clReleaseMemObject(vectorFieldMems[i]);
@@ -548,7 +604,7 @@ public class GPUManager {
         if(targetPosMem != null) clReleaseMemObject(targetPosMem);
         if(targetPosBuffer != null) MemoryUtil.memFree(targetPosBuffer);
 
-        // Cleanup Direct Buffers and cl_mems for stimuli
+        // 清理刺激源相关缓冲区
         for (int i = 0; i < SWAP_SLOTS; i++) {
             if (stimPosMems[i] != null) clReleaseMemObject(stimPosMems[i]);
             if (stimChannelMems[i] != null) clReleaseMemObject(stimChannelMems[i]);

@@ -12,7 +12,11 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 /**
- * 跑图预取：在玩家前方少量区块提前挂载 ticket，减少跑图加载停顿。
+ * 跑图预取 (Chunk Prefetcher)。
+ * <p>
+ * 在玩家移动方向的前方少量区块提前挂载 Ticket，以强制服务器加载或保持这些区块活跃，
+ * 从而减少快速移动 (跑图) 时的加载停顿和卡顿。
+ * </p>
  */
 @Mod.EventBusSubscriber(modid = GPUEntityAccelMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class ChunkPrefetcher {
@@ -21,6 +25,12 @@ public class ChunkPrefetcher {
     private static final int PREFETCH_DEPTH = 2;    // 前向预取深度（区块）
     private static final int PREFETCH_SPREAD = 1;   // 侧向预取半径（区块）
 
+    /**
+     * 玩家每 Tick 事件处理器。
+     * 计算玩家朝向，并在前方区块挂载临时 Ticket。
+     *
+     * @param event 玩家 Tick 事件
+     */
     @SubscribeEvent
     public static void onPlayerTick(TickEvent.PlayerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
@@ -38,8 +48,8 @@ public class ChunkPrefetcher {
         double dz = look.z;
         double len = Math.sqrt(dx * dx + dz * dz);
 
+        // 若水平视线长度接近零 (垂直看)，则尝试使用身体朝向
         if (len < 1e-3) {
-            // 若视线接近零，用朝向方块方向
             dx = player.getDirection().getStepX();
             dz = player.getDirection().getStepZ();
             len = Math.sqrt(dx * dx + dz * dz);
@@ -61,11 +71,11 @@ public class ChunkPrefetcher {
                 int targetChunkZ = current.z + forwardZ * depth + sideZBase * side;
                 ChunkPos target = new ChunkPos(targetChunkX, targetChunkZ);
 
-                // 挂票，距离等级 1；使用 UNKNOWN 类型避免泛型限制
+                // 挂载 Ticket，距离等级设为 1；使用 UNKNOWN 类型避免泛型类型推断问题
                 chunkCache.addRegionTicket(TicketType.UNKNOWN, target, 1, target);
 
                 issued++;
-                if (issued >= 6) { // 控制每次触发的票数量，避免抢占
+                if (issued >= 6) { // 限制每次触发的 Ticket 数量，避免过度占用服务器资源
                     return;
                 }
             }

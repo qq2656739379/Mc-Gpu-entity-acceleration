@@ -9,29 +9,38 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 
 /**
- * GPU 加速算法选择命令 (修复版：实时修改配置)
+ * 算法选择命令处理器。
+ * <p>
+ * 注册 /gpualgo 命令，允许 OP 在游戏中实时修改配置，
+ * 如开关全局加速、切换 Swarm AI 状态等。
+ * </p>
  */
 public class AlgorithmCommand {
     
+    /**
+     * 注册命令到调度器。
+     *
+     * @param dispatcher 命令调度器
+     */
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         LiteralArgumentBuilder<CommandSourceStack> root = LiteralArgumentBuilder.<CommandSourceStack>literal("gpualgo")
-            .requires(cs -> cs.hasPermission(2)); // OP 权限
+            .requires(cs -> cs.hasPermission(2)); // 需要 OP 权限 (等级 2)
         
-        // /gpualgo global <true|false>  (总开关 - 推荐使用这个来一键切换回原版)
+        // /gpualgo global <true|false>  (总开关)
         root.then(LiteralArgumentBuilder.<CommandSourceStack>literal("global")
             .then(RequiredArgumentBuilder.<CommandSourceStack, Boolean>argument("enabled", BoolArgumentType.bool())
                 .executes(ctx -> setGlobal(ctx.getSource(), BoolArgumentType.getBool(ctx, "enabled")))
             )
         );
 
-        // /gpualgo swarm <true|false>
+        // /gpualgo swarm <true|false> (Swarm AI 开关)
         root.then(LiteralArgumentBuilder.<CommandSourceStack>literal("swarm")
             .then(RequiredArgumentBuilder.<CommandSourceStack, Boolean>argument("enabled", BoolArgumentType.bool())
                 .executes(ctx -> setSwarmAI(ctx.getSource(), BoolArgumentType.getBool(ctx, "enabled")))
             )
         );
         
-        // /gpualgo status
+        // /gpualgo status (查看状态)
         root.then(LiteralArgumentBuilder.<CommandSourceStack>literal("status")
             .executes(ctx -> showStatus(ctx.getSource()))
         );
@@ -40,9 +49,9 @@ public class AlgorithmCommand {
     }
     
     private static int setGlobal(CommandSourceStack source, boolean enabled) {
-        // 实时修改配置
+        // 实时修改配置并保存
         GPUAccelConfig.ENABLE_GPU.set(enabled);
-        GPUAccelConfig.SPEC.save(); // 保存到文件
+        GPUAccelConfig.SPEC.save();
         
         source.sendSuccess(
             () -> Component.literal("§6[GPU]§r 全局加速已" + (enabled ? "§a启用" : "§c禁用 (回退至原版 CPU)")),

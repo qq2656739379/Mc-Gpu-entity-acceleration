@@ -23,22 +23,29 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 体素地图管理器 (修复版：解决栅栏翻越问题)
+ * 体素地图管理器。
+ * <p>
+ * 将 Minecraft 的 Block 世界转换为 GPU 可读的 3D 字节数组 (Voxel Map)。
+ * 用于物理碰撞检测、视线遮挡判断和流场生成。
  * 核心优化：
- * 1. 分时切片扫描，消除卡顿。
- * 2. 识别栅栏/围墙，将其视为 2 格高障碍，防止生物翻越。
+ * <ul>
+ *   <li>分时切片扫描，避免主线程卡顿。</li>
+ *   <li>特殊方块识别 (栅栏、墙、危险方块)。</li>
+ *   <li>栅栏/围墙被处理为 2 格高的虚拟障碍，防止实体直接翻越。</li>
+ * </ul>
+ * </p>
  */
 public class VoxelManager {
     public static final int PHERO_SIZE_XZ = 512;
     public static final int PHERO_SIZE_Y = 128;
-    public static final int PHERO_CHANNELS = 8; // Grain, Meat, Fish, Salt, Predator, Prey, Herd, Player
+    public static final int PHERO_CHANNELS = 8; // 谷物, 肉类, 鱼类, 盐, 捕食者, 猎物, 兽群, 玩家
     public static final int PHERO_VOLUME = PHERO_SIZE_XZ * PHERO_SIZE_XZ * PHERO_SIZE_Y;
     public static final int PHERO_TOTAL_SIZE = PHERO_VOLUME * PHERO_CHANNELS;
     
     public static final int VOXEL_SIZE = 128; 
     public static final int VOXEL_VOLUME = VOXEL_SIZE * VOXEL_SIZE * VOXEL_SIZE;
 
-    // Voxel IDs
+    // 体素 ID 定义
     public static final byte VOXEL_AIR = 0;
     public static final byte VOXEL_SOLID = 1;
     public static final byte VOXEL_WATER = 2;
@@ -48,27 +55,41 @@ public class VoxelManager {
     private static ByteBuffer voxelBuffer;
     private static final AtomicBoolean isDirty = new AtomicBoolean(true);
     
+    // 地图原点
     private static int originX = 0;
     private static int originY = -64;
     private static int originZ = 0;
 
+    // 增量扫描指针
     private static int scanPtrX = 0;
     private static int scanPtrZ = 0;
     private static final int CHUNKS_PER_TICK = 1; 
 
+    /**
+     * 初始化体素缓冲区。
+     */
     public static void init() {
         if (voxelBuffer != null) MemoryUtil.memFree(voxelBuffer);
         voxelBuffer = MemoryUtil.memAlloc(VOXEL_VOLUME);
         clear();
     }
 
+    /**
+     * 执行增量更新。每 Tick 仅更新少量 Chunk，避免卡顿。
+     * 如果中心点移动过大，则会触发全量重置。
+     *
+     * @param level 服务器维度
+     * @param center 更新中心点
+     */
     public static void updateIncremental(ServerLevel level, BlockPos center) {
         if (voxelBuffer == null) return;
 
+        // 计算新的原点 (对齐到 Chunk 边界)
         int newOriginX = (center.getX() - VOXEL_SIZE / 2) & ~0xF;
         int newOriginY = (center.getY() - VOXEL_SIZE / 2) & ~0xF;
         int newOriginZ = (center.getZ() - VOXEL_SIZE / 2) & ~0xF;
 
+        // 如果原点偏移过大，重置整个地图
         if (Math.abs(newOriginX - originX) > 32 || Math.abs(newOriginZ - originZ) > 32 || Math.abs(newOriginY - originY) > 32) {
              originX = newOriginX;
              originY = newOriginY;
@@ -82,6 +103,7 @@ public class VoxelManager {
         int startChunkX = originX >> 4;
         int startChunkZ = originZ >> 4;
 
+        // 每 Tick 处理一定数量的 Chunk
         for (int i = 0; i < CHUNKS_PER_TICK; i++) {
             int cx = startChunkX + scanPtrX;
             int cz = startChunkZ + scanPtrZ;
@@ -104,12 +126,16 @@ public class VoxelManager {
         isDirty.set(true); 
     }
 
+    /**
+     * 快速更新单个 Chunk 的体素数据。
+     */
     public static void updateChunkFast(ServerLevel level, LevelChunk chunk) {
         if (voxelBuffer == null) return;
         
         int bx = chunk.getPos().x << 4;
         int bz = chunk.getPos().z << 4;
         
+        // 范围检查
         if (bx + 16 <= originX || bx >= originX + VOXEL_SIZE || bz + 16 <= originZ || bz >= originZ + VOXEL_SIZE) return;
 
         LevelChunkSection[] sections = chunk.getSections();
@@ -173,7 +199,7 @@ public class VoxelManager {
                                 state.getBlock() instanceof SweetBerryBushBlock ||
                                 state.getBlock() instanceof WitherRoseBlock ||
                                 state.getBlock() instanceof CactusBlock) {
-                                val = VOXEL_DANGER;
+                                val = VOXEL_DANGER; // 危险方块
                             } else {
                                 VoxelShape shape = state.getCollisionShape(level, pos);
                                 if (!shape.isEmpty()) {
@@ -195,7 +221,7 @@ public class VoxelManager {
                         // 🚀 核心修复：如果当前方块下方是高方块（栅栏），则当前位置视为固体（虚拟墙）
                         // 这样 GPU 就认为这是 2 格高的墙，不会尝试跳过去
                         if (colIsTall[z * 16 + x]) {
-                            val = VOXEL_SOLID; // 标记为实体，防止跳跃
+                            val = VOXEL_SOLID;
                         }
 
                         // 更新状态供下一层 (y+1) 使用

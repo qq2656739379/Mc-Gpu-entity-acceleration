@@ -64,12 +64,10 @@ public class PhysicsSimulation {
     // 包含 Voxel 查找的辅助函数 (与 AI 模块保持一致)
     private static final String COMMON_FUNC = """
         #define VOXEL_AIR 0
-        #define VOXEL_SOLID 1
-        #define VOXEL_LIQUID 2
-        #define VOXEL_FENCE 3
+        #define VOXEL_WATER 2
         #define VOXEL_DANGER 4
+        #define VOXEL_SOLID_BASE 100
         
-        // 获取指定坐标的体素类型
         char get_voxel(float3 p, __global const char* voxels, int oX, int oY, int oZ, int size) {
             int ix = (int)floor(p.x) - oX;
             int iy = (int)floor(p.y) - oY;
@@ -79,13 +77,35 @@ public class PhysicsSimulation {
             }
             return VOXEL_AIR;
         }
-        
-        // 检查位置是否为固体障碍物
-        bool is_solid(float3 p, __global const char* voxels, int oX, int oY, int oZ, int size) {
+
+        // 获取指定位置的地面高度 (绝对 Y 坐标)
+        // 如果该位置是空气，返回极为负的值 (-99999.0)
+        // 支持解析高度编码 (VOXEL_SOLID_BASE + height*16)
+        float get_block_top(float3 p, __global const char* voxels, int oX, int oY, int oZ, int size) {
             char v = get_voxel(p, voxels, oX, oY, oZ, size);
-            // 实体方块、栅栏、危险区域 (岩浆/火) 在物理计算中均视为碰撞体
-            // 栅栏和危险区域被视为固体，用于阻挡基本移动
-            return (v == VOXEL_SOLID || v == VOXEL_FENCE || v == VOXEL_DANGER);
+            unsigned char uv = (unsigned char)v; // 转换为无符号以正确处理 > 127 的值
+
+            if (uv >= VOXEL_SOLID_BASE) {
+                float height = (float)(uv - VOXEL_SOLID_BASE) / 16.0f;
+                return floor(p.y) + height;
+            }
+            // 危险方块视为完整方块 (1.0 高度)
+            if (v == VOXEL_DANGER) return floor(p.y) + 1.0f;
+
+            return -99999.0f;
+        }
+
+        // 检查点是否位于固体内部
+        bool is_inside_solid(float3 p, __global const char* voxels, int oX, int oY, int oZ, int size) {
+            char v = get_voxel(p, voxels, oX, oY, oZ, size);
+            unsigned char uv = (unsigned char)v;
+
+            if (uv >= VOXEL_SOLID_BASE) {
+                float top = floor(p.y) + (float)(uv - VOXEL_SOLID_BASE) / 16.0f;
+                return p.y < top;
+            }
+            if (v == VOXEL_DANGER) return true;
+            return false;
         }
     """;
 
@@ -117,23 +137,18 @@ public class PhysicsSimulation {
             float elast  = params[pIdx + 2]; // 弹性系数
             float isFly  = params[pIdx + 3];
 
-            // 1. 获取当前位置的体素状态
+            // 1. 获取当前位置的体素状态 (用于流体判断)
             char voxelAtBody = get_voxel(pos + (float3)(0, radius, 0), voxels, voxOX, voxOY, voxOZ, voxSize);
             char voxelAtFeet = get_voxel(pos + (float3)(0, 0.1f, 0), voxels, voxOX, voxOY, voxOZ, voxSize);
 
             // 2. 状态判断 (严格状态机)
-            bool inWater = (voxelAtBody == VOXEL_LIQUID || voxelAtFeet == VOXEL_LIQUID);
+            bool inWater = (voxelAtBody == VOXEL_WATER || voxelAtFeet == VOXEL_WATER);
 
             // 3. 施加外力
             if (inWater) {
                 // === 水下物理 ===
                 // 浮力：仅当确实在水中时应用
                 // 重力 (向下) + 浮力 (向上)
-                // 假设密度 > 空气，因此如果是中性浮力则施加净向上力
-
-                // 修复“飞鱼”问题：如果它们离开水面，此代码块绝不能运行。
-
-                // 标准浮力 > 重力，确保浮起
                 float buoyancy = globalGravity * 1.5f;
                 vel.y += buoyancy * dt;
 
@@ -167,53 +182,75 @@ public class PhysicsSimulation {
             float3 nextPos = pos + vel * dt;
             
             // 5. 地形碰撞检测
-            // 检查地面/墙壁碰撞
-            if (is_solid(nextPos, voxels, voxOX, voxOY, voxOZ, voxSize)) {
+            // 检查 nextPos 是否进入了固体 (地面 或 墙壁)
+            // 关键修复：使用精确的高度检查，支持薄雪层和栅栏
 
-                // A. 自动台阶 (楼梯/半砖)
-                // 检查是否可以向上步进 1.1 格
-                float3 stepPos = nextPos + (float3)(0, 1.1f, 0);
+            float groundY = get_block_top(nextPos, voxels, voxOX, voxOY, voxOZ, voxSize);
+            bool isColliding = (nextPos.y < groundY);
 
-                // 特殊规则：如果碰到的方块是栅栏 (VOXEL_FENCE)，
-                // 我们视其为 1.5+ 格高，因此自动台阶失效。
-                char hitVoxel = get_voxel(nextPos, voxels, voxOX, voxOY, voxOZ, voxSize);
-                bool isFence = (hitVoxel == VOXEL_FENCE);
+            if (isColliding) {
 
-                if (!isFence && !is_solid(stepPos, voxels, voxOX, voxOY, voxOZ, voxSize)) {
-                    // 步进成功
+                // A. 自动台阶 (Auto-Step) / 贴地行走
+                // 计算需要抬高多少才能到达该地面的顶部
+                float stepHeight = groundY - pos.y;
+
+                // 特殊规则：
+                // 如果 stepHeight 在合理范围内 (0 < h <= 1.1)
+                // 且这不仅是“地面”还可能是“台阶”，我们尝试直接步进上去
+
+                // 注意：如果 stepHeight 非常大 (例如撞墙，墙高 2.0)，则不能步进
+                // 如果 stepHeight 非常小 (例如走在平坦地面微小波动，或者只是向下落)，也算步进
+
+                // 栅栏修复：栅栏高度 1.5。如果我们在栅栏下，stepHeight = 1.5 > 1.1。无法步进 -> 撞墙。正确。
+                // 如果我们已经在栅栏顶上 (pos.y = 65.5)，掉下去一点，groundY=65.5。stepHeight ~ 0。可以步进 -> 保持在顶上。正确。
+
+                if (stepHeight <= 1.1f && stepHeight > -2.0f) {
+                    // 步进成功 (或是正常的地面支撑)
                     if (vel.y < 0) vel.y = 0;
-                    nextPos.y += 0.1f; // 向上偏移
-                    pos.y += 0.1f;     // 源位置也向上偏移
+                    nextPos.y = groundY;
+                    pos.y = groundY; // 修正源位置以防止微小抖动
                 } else {
-                    // B. 碰撞响应 (滑动)
-                    float3 testX = (float3)(nextPos.x, pos.y, pos.z);
+                    // B. 碰撞响应 (Slide/Bounce) - 无法步进，视为撞击
+                    
+                    // 区分 Y 轴碰撞 (天花板?) 和 水平碰撞 (墙)
+                    // 简单的轴分离测试
+                    
+                    // 1. 测试 Y 轴 (假设 X/Z 不变)
                     float3 testY = (float3)(pos.x, nextPos.y, pos.z);
-                    float3 testZ = (float3)(pos.x, pos.y, nextPos.z);
-                    
-                    bool hitY = is_solid(testY, voxels, voxOX, voxOY, voxOZ, voxSize);
-                    bool hitX = is_solid(testX, voxels, voxOX, voxOY, voxOZ, voxSize);
-                    bool hitZ = is_solid(testZ, voxels, voxOX, voxOY, voxOZ, voxSize);
-                    
-                    if (hitY) {
-                        // 地面/天花板碰撞
-                        vel.y = -vel.y * elast * 0.1f; // 衰减反弹
-                        nextPos.y = pos.y;
-
-                        // 地面摩擦
-                        if (fabs(vel.y) < 0.1f) {
-                             vel.x *= 0.6f;
-                             vel.z *= 0.6f;
-                             if (fabs(vel.x) < 0.05f) vel.x = 0;
-                             if (fabs(vel.z) < 0.05f) vel.z = 0;
+                    if (is_inside_solid(testY, voxels, voxOX, voxOY, voxOZ, voxSize)) {
+                        // 主要是落地检测 (但通常上面 Auto-Step 已经处理了落地)
+                        // 这里可能是撞天花板
+                        if (vel.y > 0) {
+                             vel.y = -vel.y * 0.5f;
                         }
+                        // 修正位置
+                         // 如果是撞天花板，应该推出来? 简化处理，保持原Y
+                         if (nextPos.y > pos.y) nextPos.y = pos.y;
                     }
-                    if (hitX) {
+
+                    // 2. 测试 X 轴
+                    float3 testX = (float3)(nextPos.x, pos.y + 0.1f, pos.z); // +0.1f 稍微抬高一点检测墙壁
+                    if (is_inside_solid(testX, voxels, voxOX, voxOY, voxOZ, voxSize)) {
                         vel.x = -vel.x * 0.5f;
                         nextPos.x = pos.x;
                     }
-                    if (hitZ) {
+
+                    // 3. 测试 Z 轴
+                    float3 testZ = (float3)(pos.x, pos.y + 0.1f, nextPos.z);
+                    if (is_inside_solid(testZ, voxels, voxOX, voxOY, voxOZ, voxSize)) {
                         vel.z = -vel.z * 0.5f;
                         nextPos.z = pos.z;
+                    }
+
+                    // 摩擦 (当在地面上滑动时)
+                    // 如果刚才处理了 Ground Collision 或者 Auto-step 没触发但我们在地面附近?
+                    // 这里的逻辑有点复杂。简化：
+                    // 如果 Y 速度很小，应用摩擦
+                    if (fabs(vel.y) < 0.1f) {
+                         vel.x *= 0.6f;
+                         vel.z *= 0.6f;
+                         if (fabs(vel.x) < 0.05f) vel.x = 0;
+                         if (fabs(vel.z) < 0.05f) vel.z = 0;
                     }
                 }
             }

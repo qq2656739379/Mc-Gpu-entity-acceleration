@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ul>
  *   <li>分时切片扫描，避免主线程卡顿。</li>
  *   <li>特殊方块识别 (栅栏、墙、危险方块)。</li>
- *   <li>栅栏/围墙被处理为 2 格高的虚拟障碍，防止实体直接翻越。</li>
+ *   <li>支持可变高度的碰撞箱 (如雪层、栅栏、台阶)，ID >= 100 表示带有高度信息的固体。</li>
  * </ul>
  * </p>
  */
@@ -47,10 +47,14 @@ public class VoxelManager {
 
     // 体素 ID 定义
     public static final byte VOXEL_AIR = 0;
-    public static final byte VOXEL_SOLID = 1;
+    // 弃用旧的 SOLID/FENCE 定义，保留 WATER/DANGER
     public static final byte VOXEL_WATER = 2;
-    public static final byte VOXEL_FENCE = 3;
     public static final byte VOXEL_DANGER = 4;
+
+    // 新的固体定义：基准值 100
+    // ID = 100 + (int)(height * 16)
+    // 范围: 100 (height=0) 到 100 + 16*2 = 132 (height=2.0)
+    public static final int VOXEL_SOLID_BASE = 100;
 
     private static ByteBuffer voxelBuffer;
     private static final AtomicBoolean isDirty = new AtomicBoolean(true);
@@ -152,24 +156,6 @@ public class VoxelManager {
             
             if (baseBlockY + 16 <= originY || baseBlockY >= originY + VOXEL_SIZE) continue;
 
-            // 🚀 优化：预计算“下方方块是否为高方块”数组，用于处理栅栏逻辑
-            boolean[] colIsTall = new boolean[256];
-            if (i > 0 && sections[i-1] != null && !sections[i-1].hasOnlyAir()) {
-                LevelChunkSection belowSection = sections[i-1];
-                for(int z=0; z<16; z++) for(int x=0; x<16; x++) {
-                    pos.set(bx + x, baseBlockY - 1, bz + z);
-                    BlockState bs = belowSection.getBlockState(x, 15, z);
-                    colIsTall[z*16+x] = isTallBlock(bs);
-                }
-            } else if (i == 0) {
-                 // 底部 Section，回退到普通查询
-                 for(int z=0; z<16; z++) for(int x=0; x<16; x++) {
-                    pos.set(bx + x, baseBlockY - 1, bz + z);
-                    BlockState bs = chunk.getBlockState(pos);
-                    colIsTall[z*16+x] = isTallBlock(bs);
-                 }
-            }
-
             for (int y = 0; y < 16; y++) {
                 int worldY = baseBlockY + y;
                 if (worldY < originY || worldY >= originY + VOXEL_SIZE) continue;
@@ -190,7 +176,6 @@ public class VoxelManager {
                         BlockState state = section.getBlockState(x, y, z);
                         
                         byte val = VOXEL_AIR;
-                        boolean currentIsTall = false;
 
                         if (!state.isAir()) { 
                             if (state.getBlock() instanceof FireBlock ||
@@ -203,14 +188,26 @@ public class VoxelManager {
                             } else {
                                 VoxelShape shape = state.getCollisionShape(level, pos);
                                 if (!shape.isEmpty()) {
-                                    // 基础固体
-                                    val = VOXEL_SOLID;
+                                    // 计算碰撞箱最高点
+                                    double height = shape.max(Direction.Axis.Y);
 
-                                    // 检查是否为高方块 (栅栏/围墙)
+                                    // 栅栏/围墙特殊处理: 强制高度为 1.5，防止跳跃翻越
+                                    // 同时解决物理引擎 "Twitching" 问题，通过精确高度匹配
                                     if (isTallBlock(state)) {
-                                        val = VOXEL_FENCE;
-                                        currentIsTall = true;
+                                        height = 1.5;
                                     }
+
+                                    // 编码高度到 Voxel ID
+                                    // 1.0 -> 16 units -> ID 116
+                                    // 0.125 (Snow) -> 2 units -> ID 102
+                                    int heightSteps = (int)(height * 16.0 + 0.5); // 四舍五入
+                                    if (heightSteps < 1) heightSteps = 1;
+
+                                    int id = VOXEL_SOLID_BASE + heightSteps;
+                                    if (id > 255) id = 255; // 防止溢出
+
+                                    val = (byte)id;
+
                                 } else {
                                     FluidState fluid = state.getFluidState();
                                     if (!fluid.isEmpty()) val = VOXEL_WATER; // 液体
@@ -218,14 +215,8 @@ public class VoxelManager {
                             }
                         }
 
-                        // 🚀 核心修复：如果当前方块下方是高方块（栅栏），则当前位置视为固体（虚拟墙）
-                        // 这样 GPU 就认为这是 2 格高的墙，不会尝试跳过去
-                        if (colIsTall[z * 16 + x]) {
-                            val = VOXEL_SOLID;
-                        }
-
-                        // 更新状态供下一层 (y+1) 使用
-                        colIsTall[z * 16 + x] = currentIsTall;
+                        // 移除旧的 "colIsTall" 逻辑，不再需要人为填充上层方块
+                        // 依靠新的高度编码机制解决碰撞
 
                         int idx = lx + lz * VOXEL_SIZE + ly * VOXEL_SIZE * VOXEL_SIZE;
                         voxelBuffer.put(idx, val);

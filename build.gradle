@@ -4,7 +4,6 @@ plugins {
     id 'maven-publish'
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
     id 'com.github.johnrengelman.shadow' version '8.1.1'
-    id 'org.spongepowered.mixin' version '0.7.+'
 }
 
 version = '1.0.0'
@@ -16,6 +15,7 @@ base {
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
+// 仅对需要打包的依赖进行 shading，避免与其他 Mod/版本冲突
 configurations {
     shade
     implementation.extendsFrom(shade)
@@ -24,18 +24,11 @@ configurations {
 minecraft {
     mappings channel: 'official', version: '1.20.1'
     
-    // Add Mixin config
-    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
-
     runs {
         server {
             workingDirectory project.file('run')
             property 'forge.logging.markers', 'REGISTRIES'
             property 'forge.logging.console.level', 'debug'
-            property 'mixin.env.remapRefMap', 'true'
-            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
-            args '-mixin.config=gpuaccel.mixins.json'
-
             mods {
                 gpuaccel {
                     source sourceSets.main
@@ -59,22 +52,9 @@ minecraft {
 
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
-sourceSets {
-    main {
-        java {
-            srcDir 'src/stub/java'
-        }
-    }
-}
-
 repositories {
     mavenCentral()
     maven { url 'https://maven.minecraftforge.net/' }
-    maven { url 'https://maven.blamejared.com' } // Patchouli
-    maven {
-        url 'https://www.cursemaven.com'
-        content { includeGroup "curse.maven" }
-    }
 }
 
 dependencies {
@@ -82,31 +62,22 @@ dependencies {
     
     // JOCL for GPU acceleration (OpenCL)
     shade 'org.jocl:jocl:2.0.6'
+    
+    // Apache Commons Math for mathematical operations
     shade 'org.apache.commons:commons-math3:3.6.1'
+
+    // LWJGL OpenCL 绑定（包含全部依赖，不再排除核心）
     shade 'org.lwjgl:lwjgl-opencl:3.3.1'
+
+    // LWJGL 核心库（随包提供，避免服务器缺失）
     shade 'org.lwjgl:lwjgl:3.3.1'
+
+    // LWJGL 本地库（包含 Windows / Linux）
     shade 'org.lwjgl:lwjgl:3.3.1:natives-windows'
     shade 'org.lwjgl:lwjgl:3.3.1:natives-linux'
-
-    // Mixin
-    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
-
-    // Dependencies for TFC integration
-    compileOnly fg.deobf("vazkii.patchouli:Patchouli:1.20.1-84-FORGE")
-
-    // TFC Dependency - Using a placeholder ID.
-    // Please replace '0000000' with the actual File ID for TFC 1.20.1 (e.g. from CurseForge)
-    // implementation fg.deobf("curse.maven:terrafirmacraft-302973:0000000")
-}
-
-mixin {
-    add sourceSets.main, "gpuaccel.mixins.json"
-    config "gpuaccel.mixins.json"
-    config "gpuaccel.mixins.tfc.json"
 }
 
 tasks.named('jar', Jar).configure {
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     manifest {
         attributes([
             'Specification-Title'     : 'GPU Entity Acceleration',
@@ -115,12 +86,9 @@ tasks.named('jar', Jar).configure {
             'Implementation-Title'    : project.name,
             'Implementation-Version'  : project.jar.archiveVersion,
             'Implementation-Vendor'   : 'GPUAccel',
-            'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
-            'MixinConfigs'            : 'gpuaccel.mixins.json,gpuaccel.mixins.tfc.json'
+            'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
         ])
     }
-    // Exclude TFC Stubs from final jar
-    exclude 'net/dries007/**'
 }
 
 publishing {
@@ -140,26 +108,42 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// ==========================================
+//   构建核心配置 (修复混淆顺序)
+// ==========================================
+
+// 1. 配置 ShadowJar
 shadowJar {
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    // 设置为空字符串，意味着这个 Jar 会直接覆盖默认生成的 jar (成为主构建产物)
     archiveClassifier.set('')
+    
+    // 指定要打包的依赖配置
     configurations = [project.configurations.shade]
+
+    // 重定位包名 (非常重要，防止类冲突)
     relocate 'org.apache.commons.math3', 'com.gpuaccel.shaded.commons.math3'
+    
+    // 排除一些垃圾文件
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/*.RSA'
-    // Exclude TFC Stubs from shadow jar
-    exclude 'net/dries007/**'
 }
 
+// 2. 禁用默认 jar 的混淆任务 (避免浪费时间，因为我们只用 shadowJar)
 tasks.jar.configure {
+    // 给默认的瘦 jar 改个后缀，避免和 shadowJar 抢名字
     archiveClassifier.set('slim')
 }
+// 取消 jar 和 reobfJar 的关联 (这行很重要，打断旧逻辑)
 tasks.jar.finalizedBy([])
 
+// 让 ForgeGradle 为 shadowJar 生成重混淆任务
 reobf {
     shadowJar {}
 }
 
+// 3. 建立正确的链条: shadowJar -> reobfShadowJar
 tasks.shadowJar.finalizedBy('reobfShadowJar')
+
+// 确保构建产出是混淆后的 shadowJar
 tasks.build.dependsOn(tasks.named('reobfShadowJar'))

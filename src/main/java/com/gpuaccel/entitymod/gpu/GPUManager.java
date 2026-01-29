@@ -101,6 +101,14 @@ public class GPUManager {
     // 体素地图缓冲区
     private cl_mem voxelMem;
     
+    // 塌方模拟缓冲区
+    private cl_mem collapseInputMem;
+    private cl_mem collapseStabilityMem;
+    private cl_mem collapseOutputCoordsMem;
+    private cl_mem collapseOutputCountMem;
+    private cl_mem collapseChangedFlagMem;
+    private int collapseVolume = 0;
+
     public static int[] currentMapOrigin = new int[3];
 
     // 回读缓冲区 (Readback)
@@ -583,6 +591,110 @@ public class GPUManager {
         if(readBackZ != null) MemoryUtil.memFree(readBackZ);
     }
 
+    // --- 塌方模拟相关方法 ---
+
+    public void ensureCollapseBuffers(int volume) {
+        if (!gpuAvailable) return;
+        if (volume > collapseVolume) {
+            // Release old
+            if (collapseInputMem != null) clReleaseMemObject(collapseInputMem);
+            if (collapseStabilityMem != null) clReleaseMemObject(collapseStabilityMem);
+            if (collapseOutputCoordsMem != null) clReleaseMemObject(collapseOutputCoordsMem);
+            if (collapseOutputCountMem != null) clReleaseMemObject(collapseOutputCountMem);
+            if (collapseChangedFlagMem != null) clReleaseMemObject(collapseChangedFlagMem);
+
+            collapseVolume = volume;
+
+            collapseInputMem = clCreateBuffer(context, CL_MEM_READ_ONLY, (long)volume * Sizeof.cl_int, null, null);
+            collapseStabilityMem = clCreateBuffer(context, CL_MEM_READ_WRITE, (long)volume * Sizeof.cl_int, null, null);
+            collapseOutputCoordsMem = clCreateBuffer(context, CL_MEM_READ_WRITE, (long)volume * 3 * Sizeof.cl_int, null, null); // Worst case: all collapse
+            collapseOutputCountMem = clCreateBuffer(context, CL_MEM_READ_WRITE, Sizeof.cl_int, null, null);
+            collapseChangedFlagMem = clCreateBuffer(context, CL_MEM_READ_WRITE, Sizeof.cl_int, null, null);
+        }
+    }
+
+    public void uploadCollapseInput(IntBuffer inputData, int volume) {
+        if (!gpuAvailable) return;
+        ensureCollapseBuffers(volume);
+        clEnqueueWriteBuffer(commandQueue, collapseInputMem, CL_TRUE, 0, (long)volume * Sizeof.cl_int, Pointer.to(inputData), 0, null, null);
+    }
+
+    /**
+     * 执行塌方模拟。
+     * @return 包含结果坐标的 IntBuffer (x, y, z, x, y, z...), 注意: 调用者需释放 Buffer (如果分配了堆外内存)
+     *         这里为了方便，我们返回一个堆内的 int[] 数组
+     */
+    public int[] runCollapseSimulation(cl_kernel initK, cl_kernel propK, cl_kernel collectK, int sizeX, int sizeY, int sizeZ, int supportDist) {
+        if (!gpuAvailable) return new int[0];
+
+        int volume = sizeX * sizeY * sizeZ;
+        ensureCollapseBuffers(volume);
+
+        long[] global = new long[]{volume};
+
+        // 1. Init Stability
+        clSetKernelArg(initK, 0, Sizeof.cl_mem, Pointer.to(collapseInputMem));
+        clSetKernelArg(initK, 1, Sizeof.cl_mem, Pointer.to(collapseStabilityMem));
+        clSetKernelArg(initK, 2, Sizeof.cl_int, Pointer.to(new int[]{sizeX}));
+        clSetKernelArg(initK, 3, Sizeof.cl_int, Pointer.to(new int[]{sizeY}));
+        clSetKernelArg(initK, 4, Sizeof.cl_int, Pointer.to(new int[]{sizeZ}));
+
+        clEnqueueNDRangeKernel(commandQueue, initK, 1, null, global, null, 0, null, null);
+
+        // 2. Propagate Loop
+        int[] changedHost = new int[1];
+        int iter = 0;
+        int maxIter = sizeY + sizeX + sizeZ + 10; // Heuristic max iterations
+
+        clSetKernelArg(propK, 0, Sizeof.cl_mem, Pointer.to(collapseInputMem));
+        clSetKernelArg(propK, 1, Sizeof.cl_mem, Pointer.to(collapseStabilityMem));
+        clSetKernelArg(propK, 2, Sizeof.cl_mem, Pointer.to(collapseChangedFlagMem));
+        clSetKernelArg(propK, 3, Sizeof.cl_int, Pointer.to(new int[]{sizeX}));
+        clSetKernelArg(propK, 4, Sizeof.cl_int, Pointer.to(new int[]{sizeY}));
+        clSetKernelArg(propK, 5, Sizeof.cl_int, Pointer.to(new int[]{sizeZ}));
+        clSetKernelArg(propK, 6, Sizeof.cl_int, Pointer.to(new int[]{supportDist}));
+
+        while (iter < maxIter) {
+            changedHost[0] = 0;
+            clEnqueueWriteBuffer(commandQueue, collapseChangedFlagMem, CL_FALSE, 0, Sizeof.cl_int, Pointer.to(changedHost), 0, null, null);
+
+            clEnqueueNDRangeKernel(commandQueue, propK, 1, null, global, null, 0, null, null);
+
+            clEnqueueReadBuffer(commandQueue, collapseChangedFlagMem, CL_TRUE, 0, Sizeof.cl_int, Pointer.to(changedHost), 0, null, null);
+
+            if (changedHost[0] == 0) break; // Converged
+            iter++;
+        }
+
+        // 3. Collect Results
+        int[] countHost = new int[]{0};
+        clEnqueueWriteBuffer(commandQueue, collapseOutputCountMem, CL_TRUE, 0, Sizeof.cl_int, Pointer.to(countHost), 0, null, null);
+
+        clSetKernelArg(collectK, 0, Sizeof.cl_mem, Pointer.to(collapseInputMem));
+        clSetKernelArg(collectK, 1, Sizeof.cl_mem, Pointer.to(collapseStabilityMem));
+        clSetKernelArg(collectK, 2, Sizeof.cl_mem, Pointer.to(collapseOutputCoordsMem));
+        clSetKernelArg(collectK, 3, Sizeof.cl_mem, Pointer.to(collapseOutputCountMem));
+        clSetKernelArg(collectK, 4, Sizeof.cl_int, Pointer.to(new int[]{sizeX}));
+        clSetKernelArg(collectK, 5, Sizeof.cl_int, Pointer.to(new int[]{sizeY}));
+        clSetKernelArg(collectK, 6, Sizeof.cl_int, Pointer.to(new int[]{sizeZ}));
+        clSetKernelArg(collectK, 7, Sizeof.cl_int, Pointer.to(new int[]{volume})); // Max Output
+        clSetKernelArg(collectK, 8, Sizeof.cl_int, Pointer.to(new int[]{supportDist}));
+
+        clEnqueueNDRangeKernel(commandQueue, collectK, 1, null, global, null, 0, null, null);
+
+        // 4. Readback
+        clEnqueueReadBuffer(commandQueue, collapseOutputCountMem, CL_TRUE, 0, Sizeof.cl_int, Pointer.to(countHost), 0, null, null);
+
+        int count = countHost[0];
+        if (count > volume) count = volume; // Safety
+        if (count == 0) return new int[0];
+
+        int[] resultCoords = new int[count * 3];
+        clEnqueueReadBuffer(commandQueue, collapseOutputCoordsMem, CL_TRUE, 0, (long)count * 3 * Sizeof.cl_int, Pointer.to(resultCoords), 0, null, null);
+
+        return resultCoords;
+    }
+
     public void cleanup() {
         cleanupSwarmBuffers();
         if (commandQueue != null) clReleaseCommandQueue(commandQueue);
@@ -595,6 +707,13 @@ public class GPUManager {
         if (attrZMem != null) clReleaseMemObject(attrZMem);
         if (attrTypeMem != null) clReleaseMemObject(attrTypeMem);
         if (beeStatesMem != null) clReleaseMemObject(beeStatesMem);
+
+        // Cleanup collapse buffers
+        if (collapseInputMem != null) clReleaseMemObject(collapseInputMem);
+        if (collapseStabilityMem != null) clReleaseMemObject(collapseStabilityMem);
+        if (collapseOutputCoordsMem != null) clReleaseMemObject(collapseOutputCoordsMem);
+        if (collapseOutputCountMem != null) clReleaseMemObject(collapseOutputCountMem);
+        if (collapseChangedFlagMem != null) clReleaseMemObject(collapseChangedFlagMem);
 
         // 清理流场资源
         for(int i=0; i<FIELD_COUNT; i++) {

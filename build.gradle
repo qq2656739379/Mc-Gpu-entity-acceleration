@@ -141,6 +141,7 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 shadowJar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     archiveClassifier.set('')
     configurations = [project.configurations.shade]
     relocate 'org.apache.commons.math3', 'com.gpuaccel.shaded.commons.math3'

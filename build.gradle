@@ -106,6 +106,7 @@ mixin {
 }
 
 tasks.named('jar', Jar).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     manifest {
         attributes([
             'Specification-Title'     : 'GPU Entity Acceleration',

@@ -1,0 +1,27 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="gpuaccel"
+version="${file.jarVersion}"
+displayName="GPU Entity Acceleration"
+description='''
+A server-side mod that accelerates entity-related computations (AI, physics) using GPU processing.
+使用 GPU 加速生物相关计算（AI、物理模拟）的服务端 Mod。
+'''
+authors="GPUAccel Team"
+
+[[dependencies.gpuaccel]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47.4,48)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.gpuaccel]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1]"
+    ordering="NONE"
+    side="SERVER"
